@@ -75,6 +75,8 @@ powershell -ExecutionPolicy Bypass -File .\build.ps1
 
 `build.ps1` 先运行测试，成功后调用 `Friendbook.spec` 创建目录版 exe，并复制说明和演示数据。开发和安装依赖需要网络；应用运行与 exe 使用无需网络。`--smoke-test` 为构建验证选项，启动窗口约 1.2 秒后正常退出，不导入演示数据。
 
+GitHub 的 `Windows tests` 检查会在相关 PR 和主分支更新时，用 Windows / Python 3.11 运行完整测试并重复检查拖动交互。长按测试会在有限超时内等待实际状态，避免把固定毫秒等待误当成定时器已执行；失败仍会阻止本地打包。
+
 ## 课程要求对应
 
 | 要求 | 模块 / 实现 |

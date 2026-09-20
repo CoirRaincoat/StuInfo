@@ -51,6 +51,26 @@ def wait_task(window):
     QApplication.processEvents()
 
 
+def wait_until(predicate, description, timeout=2.0):
+    """Process Qt events until a state is reached; timer callbacks may arrive late."""
+    until = time.monotonic() + timeout
+    while not predicate():
+        if time.monotonic() >= until:
+            pytest.fail(description() if callable(description) else description)
+        QTest.qWait(10)
+
+
+def wait_for_drag(table, expected):
+    def state():
+        return (f'Drag did not start: management={table.management}, allowed={table.reorder_allowed}, '
+                f'pressed={table._pressed_handle is not None}, timer_active={table._long_press.isActive()}, '
+                f'remaining_ms={table._long_press.remainingTime()}, focus={table.hasFocus()}, '
+                f'drag_ids={table._drag_ids!r}')
+    assert table._pressed_handle in expected, state()
+    wait_until(lambda: bool(table._drag_ids) or table._pressed_handle is None, state)
+    assert table._drag_ids == expected, state()
+
+
 def test_sorted_selection_and_filter_identity(window):
     ids = [r['id'] for r in window.store.records()]
     window.sort.setCurrentIndex(1)
@@ -266,8 +286,7 @@ def test_handle_drag_commits_only_after_release_and_cancel_is_safe(window):
     start = table.visualItemRect(table.item(0, 4)).center()
     end = table.visualItemRect(table.item(1, 4)).bottomLeft() + QPoint(15, -2)
     QTest.mousePress(table.viewport(), Qt.MouseButton.LeftButton, pos=start)
-    QTest.qWait(220)
-    assert table._drag_ids == [ids[0]]
+    wait_for_drag(table, [ids[0]])
     QTest.mouseMove(table.viewport(), end)
     assert [r['id'] for r in window.store.records()] == ids
     QTest.mouseRelease(table.viewport(), Qt.MouseButton.LeftButton, pos=end)
@@ -276,7 +295,7 @@ def test_handle_drag_commits_only_after_release_and_cancel_is_safe(window):
     QApplication.processEvents()
     start = table.visualItemRect(table.item(0, 4)).center()
     QTest.mousePress(table.viewport(), Qt.MouseButton.LeftButton, pos=start)
-    QTest.qWait(220)
+    wait_for_drag(table, [ids[1]])
     QTest.keyClick(table, Qt.Key.Key_Escape)
     QTest.mouseRelease(table.viewport(), Qt.MouseButton.LeftButton, pos=end)
     assert not window._busy
@@ -375,7 +394,8 @@ def test_row_hover_ripple_and_reduced_motion(window):
     assert not window.detail_panel.isVisible()
 
 
-def test_drag_multiple_and_autoscroll(window):
+@pytest.mark.parametrize('delayed_events', [False, True], ids=['normal', 'busy-event-loop'])
+def test_drag_multiple_and_autoscroll(window, delayed_events):
     window.set_reduce_motion(True)
     for index in range(25):
         window.store.save(dict(new_record(), name=f'批量演示 {index}'))
@@ -388,20 +408,58 @@ def test_drag_multiple_and_autoscroll(window):
     table = window.table
     table.setVerticalScrollMode(table.ScrollMode.ScrollPerPixel)
     start = table.visualItemRect(table.item(0, 4)).center()
+    assert table.viewport().rect().contains(start)
     QTest.mousePress(table.viewport(), Qt.MouseButton.LeftButton, pos=start)
-    QTest.qWait(200)
-    assert table._drag_ids == [ids[0], ids[2]]
+    if delayed_events:
+        # Reproduce a busy event loop across the old 200 ms assertion deadline.
+        blocker = QTimer(table)
+        blocker.setSingleShot(True)
+        blocker.timeout.connect(lambda: time.sleep(.14))
+        blocker.start(120)
+    wait_for_drag(table, [ids[0], ids[2]])
+    assert [r['id'] for r in window.store.records()] == ids
     end = QPoint(start.x(), table.viewport().height() - 4)
+    previous_scroll = table.verticalScrollBar().value()
     QTest.mouseMove(table.viewport(), end)
-    QTest.qWait(140)
-    assert table.verticalScrollBar().value() > 0
-    anchor = next((uid for uid in ids[table._drag_slot:] if uid not in table._drag_ids), None)
+    wait_until(lambda: table.verticalScrollBar().value() > previous_scroll, 'Edge autoscroll did not advance')
+    # Leave the scrolling edge and drop after a known row; compute expected order
+    # independently of the preview's _drag_slot, which changes while scrolling.
+    end = table.visualItemRect(table.item(6, 4)).bottomLeft() + QPoint(15, -2)
+    assert table.viewport().rect().contains(end)
+    QTest.mouseMove(table.viewport(), end)
     QTest.mouseRelease(table.viewport(), Qt.MouseButton.LeftButton, pos=end)
     wait_task(window)
     remaining = [uid for uid in ids if uid not in (ids[0], ids[2])]
-    at = remaining.index(anchor) if anchor else len(remaining)
+    at = remaining.index(ids[7])
     assert [r['id'] for r in window.store.records()] == remaining[:at] + [ids[0], ids[2]] + remaining[at:]
     assert set(window.selected_batch_ids()) == {ids[0], ids[2]}
+
+
+@pytest.mark.parametrize('interrupt', ['release', 'escape', 'focus-out', 'exit-management'])
+def test_pending_long_press_can_be_cancelled(window, interrupt):
+    window.set_reduce_motion(True)
+    ids = [r['id'] for r in window.store.records()]
+    window.management_button.click()
+    QApplication.processEvents()
+    table = window.table
+    start = table.visualItemRect(table.item(0, 4)).center()
+    QTest.mousePress(table.viewport(), Qt.MouseButton.LeftButton, pos=start)
+    assert table._pressed_handle == ids[0] and table._long_press.isActive()
+    if interrupt == 'release':
+        QTest.mouseRelease(table.viewport(), Qt.MouseButton.LeftButton, pos=start)
+    elif interrupt == 'escape':
+        QTest.keyClick(table, Qt.Key.Key_Escape)
+    elif interrupt == 'focus-out':
+        window.query.setFocus()
+        QApplication.processEvents()
+    else:
+        window.set_management(False)
+    assert table._pressed_handle is None and not table._long_press.isActive()
+    QTest.qWait(table._long_press.interval() + 100)
+    assert not table._drag_ids and table._ghost is None
+    if interrupt != 'release':
+        QTest.mouseRelease(table.viewport(), Qt.MouseButton.LeftButton, pos=start)
+    assert not window._busy and [r['id'] for r in window.store.records()] == ids
 
 
 def test_dirty_cancel_blocks_entering_management(window, monkeypatch):
