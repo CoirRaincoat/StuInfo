@@ -11,12 +11,13 @@ class FriendDelegate(QStyledItemDelegate):
         view = self.parent()
         opt = QStyleOptionViewItem(option)
         self.initStyleOption(opt, index)
-        opt.state &= ~QStyle.StateFlag.State_MouseOver
+        # Keep keyboard focus on the table without drawing a border around one cell.
+        opt.state &= ~(QStyle.StateFlag.State_MouseOver | QStyle.StateFlag.State_HasFocus)
         if index.row() == view.hovered_row:
             opt.state |= QStyle.StateFlag.State_MouseOver
         if view.management:
             uid = view.item(index.row(), 0).data(Qt.ItemDataRole.UserRole)
-            opt.state &= ~(QStyle.StateFlag.State_Selected | QStyle.StateFlag.State_HasFocus)
+            opt.state &= ~QStyle.StateFlag.State_Selected
             if uid in view.checked_ids:
                 opt.state |= QStyle.StateFlag.State_Selected
                 opt.backgroundBrush = opt.palette.highlight()

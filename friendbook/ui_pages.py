@@ -3,9 +3,8 @@ from datetime import date
 from PySide6.QtCore import Qt, QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QTableWidget,
-    QTableWidgetItem, QComboBox, QInputDialog, QHeaderView, QCheckBox)
+    QTableWidgetItem, QComboBox, QInputDialog, QHeaderView, QCheckBox, QTabWidget)
 from .ui_widgets import label, button, card, scroll_content, clear_layout, BarChart, configure_table
-from .ui_motion import AnimatedTabs
 
 
 class Pages:
@@ -124,7 +123,7 @@ class Pages:
             self.add(group=name.strip())
 
     def build_statistics(self):
-        self.stats_tabs = AnimatedTabs()
+        self.stats_tabs = QTabWidget()
         self.stats_layouts = {}
         for title in ('年龄', '兴趣', '分组', '生日月份'):
             page, layout = scroll_content()
@@ -181,7 +180,7 @@ class Pages:
         self.theme_choice.setCurrentIndex(int(self.dark))
         self.theme_choice.currentIndexChanged.connect(lambda index: self.set_theme(bool(index)))
         content.addWidget(self.theme_choice)
-        self.reduce_motion = QCheckBox('减少动态效果（关闭波纹、页面过渡与弹性动画）')
+        self.reduce_motion = QCheckBox('减少动态效果（关闭点击波纹与弹性动画）')
         self.reduce_motion.setChecked(bool(self.property('reduceMotion')))
         self.reduce_motion.toggled.connect(self.set_reduce_motion)
         content.addWidget(self.reduce_motion)

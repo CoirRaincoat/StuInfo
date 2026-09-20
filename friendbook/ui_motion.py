@@ -3,7 +3,7 @@ from math import hypot
 from PySide6.QtCore import QObject, QEvent, Qt, QPointF, QVariantAnimation, QEasingCurve
 from PySide6.QtGui import QPainter, QColor
 from PySide6.QtWidgets import (QApplication, QWidget, QAbstractButton, QComboBox, QTabBar,
-    QMenu, QAbstractItemView, QStackedWidget, QTabWidget, QLineEdit, QPlainTextEdit, QAbstractSlider)
+    QMenu, QAbstractItemView, QLineEdit, QPlainTextEdit, QAbstractSlider)
 
 
 def motion_enabled(widget):
@@ -43,61 +43,6 @@ class Ripple(QWidget):
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(color)
         painter.drawEllipse(self.origin, self.radius * self.progress, self.radius * self.progress)
-
-
-class TransitionCover(QWidget):
-    def __init__(self, parent, snapshot):
-        # Finish a previous transition before capturing a new one, never stack effects.
-        for previous in parent.findChildren(TransitionCover, options=Qt.FindChildOption.FindDirectChildrenOnly):
-            previous.hide()
-            previous.deleteLater()
-        super().__init__(parent)
-        self.snapshot = snapshot
-        self.progress = 0.0
-        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
-        self.setGeometry(parent.rect())
-        self.animation = QVariantAnimation(self)
-        self.animation.setStartValue(0.0)
-        self.animation.setEndValue(1.0)
-        self.animation.setDuration(170)
-        self.animation.setEasingCurve(QEasingCurve.Type.OutCubic)
-        self.animation.valueChanged.connect(self._frame)
-        self.animation.finished.connect(self.deleteLater)
-        self.show()
-        self.raise_()
-        self.animation.start()
-
-    def _frame(self, value):
-        self.progress = value
-        self.update()
-
-    def paintEvent(self, event):
-        painter = QPainter(self)
-        painter.setOpacity(1 - self.progress)
-        painter.drawPixmap(round(-12 * self.progress), 0, self.snapshot)
-
-
-class AnimatedStack(QStackedWidget):
-    def setCurrentWidget(self, widget):
-        old = self.currentWidget()
-        snapshot = old.grab() if old and old != widget and self.isVisible() and motion_enabled(self) else None
-        super().setCurrentWidget(widget)
-        if snapshot is not None:
-            TransitionCover(self, snapshot)
-
-
-class AnimatedTabs(QTabWidget):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.previous = None
-        self.currentChanged.connect(self._transition)
-
-    def _transition(self, index):
-        current = self.widget(index)
-        if self.previous is not None and current and self.isVisible() and motion_enabled(self):
-            TransitionCover(current, self.previous.grab())
-        self.previous = current
 
 
 class ClickFeedback(QObject):

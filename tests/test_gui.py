@@ -10,7 +10,7 @@ from PySide6.QtTest import QTest
 from friendbook.core import Store, new_record
 from friendbook.gui import Window
 from friendbook.ui_widgets import Editor
-from friendbook.ui_motion import Ripple, TransitionCover
+from friendbook.ui_motion import Ripple
 from friendbook.ui_contacts import ContactEditor
 
 
@@ -368,7 +368,6 @@ def test_row_hover_ripple_and_reduced_motion(window):
     QApplication.processEvents()
     assert all(not effect.isVisible() for effect in window.findChildren(Ripple))
     window.navigate('设置')
-    assert all(not effect.isVisible() for effect in window.findChildren(TransitionCover))
     window.navigate('好友')
     window.select_uid(window.store.records()[0]['id'])
     assert window.splitter.fraction == 1
