@@ -1,11 +1,11 @@
 """Modern desktop shell. Widgets use only the Store business interface."""
-from PySide6.QtCore import Qt, QSettings, QTimer
+from PySide6.QtCore import Qt, QSettings, QTimer, QSize
 from PySide6.QtGui import QAction, QKeySequence, QFont
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QFrame, QVBoxLayout,
     QHBoxLayout, QStackedWidget, QListWidget, QLineEdit, QComboBox, QCheckBox, QSplitter,
     QTableWidget, QTableWidgetItem, QMessageBox, QMenu, QToolButton, QProgressBar)
 from .core import new_record
-from .ui_widgets import (label, button, scroll_content, clear_layout, Avatar, Editor,
+from .ui_widgets import (label, button, scroll_content, clear_layout, Avatar, Editor, avatar_icon,
                          configure_table, friendly_error, apply_theme)
 from .ui_tasks import StoreTask
 from .ui_pages import Pages
@@ -151,7 +151,8 @@ class Window(QMainWindow, Pages, DataActions):
         self.table = QTableWidget(0, 4)
         configure_table(self.table)
         self.table.setHorizontalHeaderLabels(['好友', '分组', '兴趣', '出生信息'])
-        self.table.verticalHeader().setDefaultSectionSize(54)
+        self.table.setIconSize(QSize(36, 36))
+        self.table.verticalHeader().setDefaultSectionSize(56)
         self.table.itemSelectionChanged.connect(self._selection_changed)
         self.table.itemClicked.connect(self._item_clicked)
         self.table.doubleClicked.connect(self.edit)
@@ -372,6 +373,7 @@ class Window(QMainWindow, Pages, DataActions):
                 item.setData(Qt.ItemDataRole.UserRole, record['id'])
                 item.setToolTip(value)
                 if col == 0:
+                    item.setIcon(avatar_icon(record, self.table.iconSize().width()))
                     font = item.font()
                     font.setWeight(QFont.Weight.DemiBold)
                     item.setFont(font)
