@@ -5,6 +5,7 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QFrame, QVBox
     QHBoxLayout, QListWidget, QLineEdit, QComboBox, QCheckBox, QStackedWidget,
     QTableWidgetItem, QMessageBox, QMenu, QToolButton, QProgressBar, QHeaderView)
 from .core import new_record
+from .labels import record_labels
 from .ui_widgets import (label, button, scroll_content, clear_layout, Avatar, Editor, avatar_icon,
                          configure_table, friendly_error, apply_theme)
 from .ui_tasks import StoreTask
@@ -13,6 +14,7 @@ from .ui_actions import DataActions
 from .ui_management import ListManagement
 from .ui_friend_list import FriendsTable
 from .ui_motion import DrawerWorkspace, ClickFeedback, Ripple
+from .ui_charts import DistributionChart
 from .contact_fields import PROFILE_FIELDS, grouped_contacts, contact_caption
 
 
@@ -139,7 +141,7 @@ class Window(QMainWindow, Pages, DataActions, ListManagement):
         self.group = QComboBox()
         self.group.setMinimumWidth(105)
         self.tag = QLineEdit()
-        self.tag.setPlaceholderText('精确标签')
+        self.tag.setPlaceholderText('精确备注')
         self.tag.setClearButtonEnabled(True)
         self.sort = QComboBox()
         self.sort.addItems(['原始顺序', '姓名升序 · 临时', '出生信息升序 · 临时'])
@@ -160,7 +162,7 @@ class Window(QMainWindow, Pages, DataActions, ListManagement):
         list_layout.setContentsMargins(8, 2, 8, 8)
         self.table = FriendsTable()
         configure_table(self.table)
-        self.table.setHorizontalHeaderLabels(['好友', '分组', '兴趣', '出生信息'])
+        self.table.setHorizontalHeaderLabels(['好友', '标签', '兴趣', '出生信息'])
         self.table.setIconSize(QSize(32, 32))
         self.table.verticalHeader().setDefaultSectionSize(46)
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
@@ -241,7 +243,8 @@ class Window(QMainWindow, Pages, DataActions, ListManagement):
     def _set_page(self, name):
         old = self.page_name
         if self.managing and name != '好友':
-            self.set_management(False)
+            self.request_leave_management(lambda: self._set_page(name))
+            return
         self.page_name = name
         self.nav.blockSignals(True)
         self.nav.setCurrentRow(self.PAGE_NAMES.index(name))
@@ -250,7 +253,7 @@ class Window(QMainWindow, Pages, DataActions, ListManagement):
         self.subtitle.setText(self.DESCRIPTIONS[name])
         self.pages.setCurrentWidget(self.page_widgets[name])
         self.add_button.setVisible(name in ('好友', '概览'))
-        self.management_button.setVisible(name == '好友' and not self.managing)
+        self.management_button.setVisible(name == '好友')
         if name in ('好友', '回收站'):
             if old != name:
                 self._selected_id = None
@@ -326,9 +329,9 @@ class Window(QMainWindow, Pages, DataActions, ListManagement):
         current = self._filters[1]
         self.group.blockSignals(True)
         self.group.clear()
-        self.group.addItem('全部分组', None)
-        self.group.addItem('（未分组）', '')
-        for name in sorted(name for name in self.store.group_counts() if name):
+        self.group.addItem('全部标签', None)
+        self.group.addItem('（未设置标签）', '')
+        for name in self.friend_source().label_names():
             self.group.addItem(name, name)
         index = self.group.findData(current)
         if current is not None and index < 0:
@@ -346,7 +349,7 @@ class Window(QMainWindow, Pages, DataActions, ListManagement):
             control.blockSignals(True)
         self.query.setText(values[0])
         if self.group.findData(values[1]) < 0 and values[1] is not None:
-            self.group.addItem(values[1] or '（未分组）', values[1])
+            self.group.addItem(values[1] or '（未设置标签）', values[1])
         self.group.setCurrentIndex(max(0, self.group.findData(values[1])))
         self.tag.setText(values[2])
         self.favorites.setChecked(values[3])
@@ -375,13 +378,14 @@ class Window(QMainWindow, Pages, DataActions, ListManagement):
     def refresh_friends(self):
         trash = self.page_name == '回收站'
         query, group, tag, favorites, sort = self._filters
-        records = self.store.records(query, group, tag.strip(), favorites, trash)
+        source = self.friend_source()
+        records = source.records(query, group, tag.strip(), favorites, trash)
         if sort:
             key = 'name' if sort == 1 else 'birth'
             records.sort(key=lambda r: (not bool(r[key]), r[key].casefold(), r['id']))
         self._visible_records = records
         self.table.configure_management(self.managing, self._checked_ids, self.can_reorder())
-        self.table.setHorizontalHeaderLabels(['好友', '分组', '兴趣', '出生信息'] + (['移动'] if self.managing else []))
+        self.table.setHorizontalHeaderLabels(['好友', '标签', '兴趣', '出生信息'] + (['移动'] if self.managing else []))
         if self.managing:
             self.table.horizontalHeader().setMinimumSectionSize(38)
             self.table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.Fixed)
@@ -392,7 +396,7 @@ class Window(QMainWindow, Pages, DataActions, ListManagement):
         visible = False
         for row, record in enumerate(records):
             values = [('★  ' if record['favorite'] else '') + (record['name'] or '未命名好友'),
-                      record['group'] or '未分组', record['interests'] or '—', record['birth'] or '未知']
+                      ' · '.join(record_labels(record)) or '未设置标签', record['interests'] or '—', record['birth'] or '未知']
             for col, value in enumerate(values):
                 item = QTableWidgetItem(value)
                 item.setData(Qt.ItemDataRole.UserRole, record['id'])
@@ -423,7 +427,7 @@ class Window(QMainWindow, Pages, DataActions, ListManagement):
         self.query.setPlaceholderText('搜索回收站中的姓名或备注…' if trash else '搜索好友、兴趣、联系方式或备注…')
         self.group.setEnabled(not trash)
         self.tag.setEnabled(not trash)
-        total = self.store.counts()[int(trash)]
+        total = source.counts()[int(trash)]
         self.hint.setText(f'显示 {len(records)} / {total} 位  ·  ' + ('还原后置于原始顺序末尾' if trash else ('临时排序仅改变显示顺序' if sort else '原始顺序')))
         if self.managing:
             self.hint.setText(self.hint.text() + (' · 拖动右侧手柄调整顺序；Esc 取消拖动' if self.can_reorder() else
@@ -492,9 +496,21 @@ class Window(QMainWindow, Pages, DataActions, ListManagement):
         except KeyError:
             self._selected_id = None
             return self.render_detail()
-        self.detail_layout.addWidget(Avatar(record, 76))
+        header = QHBoxLayout()
+        header.addWidget(Avatar(record, 76))
+        header.addStretch()
+        if self.page_name != '回收站':
+            self.favorite_button = button('★' if record['favorite'] else '☆', lambda: self.toggle_favorite(record['id']))
+            self.favorite_button.setCheckable(True)
+            self.favorite_button.setChecked(record['favorite'])
+            self.favorite_button.setFixedSize(44, 44)
+            self.favorite_button.setStyleSheet('font-size: 28px; padding: 0; color: #97804f;')
+            self.favorite_button.setToolTip('取消收藏' if record['favorite'] else '收藏好友')
+            self.favorite_button.setAccessibleName(self.favorite_button.toolTip())
+            header.addWidget(self.favorite_button, 0, Qt.AlignmentFlag.AlignTop)
+        self.detail_layout.addLayout(header)
         self.detail_layout.addWidget(label(record['name'] or '未命名好友', 'panelTitle', True))
-        self.detail_layout.addWidget(label(('★ 收藏  ·  ' if record['favorite'] else '') + (record['group'] or '未分组'), 'muted', True))
+        self.detail_layout.addWidget(label(' · '.join(record_labels(record)) or '未设置标签', 'muted', True))
         actions = QHBoxLayout()
         trash = self.page_name == '回收站'
         self.edit_button = button('还原好友' if trash else '编辑资料', self.edit, True)
@@ -511,7 +527,7 @@ class Window(QMainWindow, Pages, DataActions, ListManagement):
         self.detail_layout.addLayout(actions)
         if not trash and not self.can_reorder():
             self.detail_layout.addWidget(label('筛选或临时排序中：前后添加以当前好友在原始顺序中的位置为准；上下移动暂不可用。', 'muted', True))
-        for title, value in [('出生信息', record['birth'] or '未知'), ('兴趣', record['interests'] or '未填写'), ('标签', ' · '.join(record['tags']) or '未设置')]:
+        for title, value in [('出生信息', record['birth'] or '未知'), ('兴趣', record['interests'] or '未填写'), ('备注', ' · '.join(record['tags']) or '未填写')]:
             self.detail_layout.addWidget(label(title, 'fieldLabel'))
             item = label(value, '', True)
             item.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
@@ -546,11 +562,19 @@ class Window(QMainWindow, Pages, DataActions, ListManagement):
             item.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
             self.detail_layout.addWidget(item)
         self.detail_layout.addSpacing(6)
-        self.detail_layout.addWidget(label('备注', 'sectionTitle'))
+        self.detail_layout.addWidget(label('详细备注', 'sectionTitle'))
         notes = label(record['notes'] or '还没有备注。', '', True)
         notes.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self.detail_layout.addWidget(notes)
         self.detail_layout.addStretch()
+
+    def toggle_favorite(self, uid):
+        if self._busy or self.managing or self.editor or self.page_name == '回收站':
+            return
+        record = self.store.record(uid)
+        record['favorite'] = not record['favorite']
+        self.start_task('save', (record,), {'expected': record['version']},
+                        success=lambda _: self.notify('已加入收藏。' if record['favorite'] else '已取消收藏。'))
 
     def can_reorder(self):
         return self.page_name == '好友' and self._filters == ('', None, '', False, 0)
@@ -565,6 +589,9 @@ class Window(QMainWindow, Pages, DataActions, ListManagement):
 
     def add(self, before=None, group=''):
         if self._busy:
+            return
+        if self.managing:
+            self.request_leave_management(lambda: self.add(before, group))
             return
         anchor = self._selected_id if before is not None else None
         if before is not None and (not anchor or self.page_name != '好友'):
@@ -592,7 +619,7 @@ class Window(QMainWindow, Pages, DataActions, ListManagement):
     def open_editor(self, record, title, **context):
         self.discard_editor(render=False)
         self.editor_context = context
-        self.editor = Editor(record, title, self.detail_panel)
+        self.editor = Editor(record, title, self.detail_panel, available_labels=self.store.label_names())
         self.editor.save_requested.connect(self.save_editor)
         self.editor.cancel_requested.connect(lambda: self.request_leave(self.render_detail))
         self.panel_stack.addWidget(self.editor)
@@ -656,6 +683,9 @@ class Window(QMainWindow, Pages, DataActions, ListManagement):
             self.request_leave(lambda: self.start_task('move_relative', (uid, direction), success=lambda _: self.notify('原始顺序已保存。'), text='正在调整顺序…'))
 
     def open_friend(self, uid):
+        if self.managing:
+            self.request_leave_management(lambda: self.open_friend(uid))
+            return
         def show():
             if self.managing:
                 self.set_management(False)
@@ -678,6 +708,9 @@ class Window(QMainWindow, Pages, DataActions, ListManagement):
         self.request_leave(focus)
 
     def reload(self):
+        if self.managing:
+            self.request_leave_management(self.reload)
+            return
         self.request_leave(lambda: self.start_task('reload', text='正在刷新磁盘数据…', success=lambda _: self.notify('已重新读取磁盘数据。')))
 
     def start_task(self, method, args=(), kwargs=None, success=None, text='正在处理…'):
@@ -690,8 +723,8 @@ class Window(QMainWindow, Pages, DataActions, ListManagement):
         task = StoreTask(self.store.path, self.store.revision, method, args, kwargs, self)
         self._tasks.add(task)
         def completed(snapshot):
-            result, book, trash, revision = snapshot
-            self.store.adopt(book, trash, revision)
+            result, book, trash, revision, catalog = snapshot
+            self.store.adopt(book, trash, revision, catalog)
             self._busy = False
             self.workspace.setEnabled(True)
             self.progress.hide()
@@ -707,6 +740,8 @@ class Window(QMainWindow, Pages, DataActions, ListManagement):
             self.notify(friendly_error(exc), True)
             if self.editor:
                 self.editor.show_error(friendly_error(exc))
+            else:
+                self.render_detail()
         def finished():
             self._tasks.discard(task)
             task.deleteLater()
@@ -752,6 +787,11 @@ class Window(QMainWindow, Pages, DataActions, ListManagement):
         self.settings.setValue('reduce_motion', reduced)
         self.splitter.finish_motion()
         self.table.cancel_drag()
+        self.management_bar.finish_motion()
+        if reduced:
+            for chart in self.stats_tabs.findChildren(DistributionChart):
+                chart.animation.stop()
+                chart._progress_changed(1.)
         for effect in self.findChildren(Ripple):
             effect.hide()
             effect.deleteLater()
@@ -760,6 +800,10 @@ class Window(QMainWindow, Pages, DataActions, ListManagement):
         if self._busy:
             self.statusBar().showMessage('正在保存或处理文件，请等待完成后关闭。')
             event.ignore()
+            return
+        if self.managing:
+            event.ignore()
+            self.request_leave_management(self.close)
             return
         if self.has_draft_changes():
             event.ignore()

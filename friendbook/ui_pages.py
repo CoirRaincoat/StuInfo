@@ -3,8 +3,27 @@ from datetime import date
 from PySide6.QtCore import Qt, QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QTableWidget,
-    QTableWidgetItem, QComboBox, QInputDialog, QHeaderView, QCheckBox, QTabWidget)
-from .ui_widgets import label, button, card, scroll_content, clear_layout, BarChart, configure_table
+    QTableWidgetItem, QComboBox, QInputDialog, QHeaderView, QCheckBox, QTabWidget, QPushButton, QDialog, QSizePolicy)
+from .ui_widgets import label, button, card, scroll_content, clear_layout, BarChart, configure_table, avatar_icon
+from .ui_charts import DistributionChart
+from .labels import record_labels
+
+
+class MetricButton(QPushButton):
+    """A metric card is a real keyboard-accessible button across its whole surface."""
+    def __init__(self, title, value, note, callback):
+        super().__init__()
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setAccessibleName(f'{title}：{value}，点击查看好友')
+        content = QVBoxLayout(self)
+        content.setContentsMargins(20, 18, 20, 18)
+        content.setSpacing(12)
+        for text, role, wrap in ((title, 'muted', False), (str(value), 'metric', False), (note, 'muted', True)):
+            text_label = label(text, role, wrap)
+            text_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+            content.addWidget(text_label)
+        self.clicked.connect(callback)
 
 
 class Pages:
@@ -16,15 +35,19 @@ class Pages:
         clear_layout(self.home_layout)
         data = self.store.overview()
         metrics = QGridLayout()
-        for i, (title, value, note) in enumerate([
-                ('好友', data['total'], '全部有效档案'),
-                ('本月生日', len(data['birthdays']), f"仅统计已知月份 · {data['month_unknown']} 位月份未知"),
-                ('收藏', data['favorites'], '留在身边的重要伙伴'),
-                ('分组', sum(bool(k) for k in data['groups']), '不含未分组')]):
-            frame, content = card()
-            content.addWidget(label(title, 'muted'))
-            content.addWidget(label(str(value), 'metric'))
-            content.addWidget(label(note, 'muted', True))
+        for i, (title, value, note, collection) in enumerate([
+                ('好友', data['total'], '全部有效档案', None),
+                ('本月生日', len(data['birthdays']), f"查看本月好友 · {data['month_unknown']} 位月份未知", 'birthdays'),
+                ('收藏', data['favorites'], '点击查看收藏的好友', 'favorites'),
+                ('标签', sum(bool(k) for k in data['groups']), '好友可以拥有多个标签', None)]):
+            if collection:
+                frame = MetricButton(title, value, note, lambda checked=False, key=collection: self.show_collection(key))
+                setattr(self, f'home_{collection}_card', frame)
+            else:
+                frame, content = card()
+                content.addWidget(label(title, 'muted'))
+                content.addWidget(label(str(value), 'metric'))
+                content.addWidget(label(note, 'muted', True))
             metrics.addWidget(frame, 0, i)
             metrics.setColumnStretch(i, 1)
         self.home_layout.addLayout(metrics)
@@ -38,35 +61,83 @@ class Pages:
         if not data['birthdays']:
             content.addWidget(label('本月暂无已知生日的好友。', 'muted'))
         if len(data['birthdays']) > 6:
-            content.addWidget(label(f"此处展示前 6 位，共 {len(data['birthdays'])} 位；完整月份分布见统计页面。", 'muted', True))
+            content.addWidget(button(f"查看全部 {len(data['birthdays'])} 位", lambda: self.show_collection('birthdays')))
         self.home_layout.addWidget(frame)
-        frame, content = card('分组一览', '按全部有效好友统计')
-        content.addWidget(BarChart([(name or '（未分组）', count) for name, count in data['groups'].most_common(6)]))
-        content.addWidget(button('管理分组', lambda: self.navigate('分组')))
+        frame, content = card('标签一览', '按全部有效好友统计；一位好友可以计入多个标签')
+        content.addWidget(BarChart([(name or '（未标记）', count) for name, count in data['groups'].most_common(6)]))
+        content.addWidget(button('管理标签', lambda: self.navigate('分组')))
         self.home_layout.addWidget(frame)
         self.home_layout.addStretch()
+
+    def show_collection(self, collection):
+        previous = getattr(self, 'collection_dialog', None)
+        if previous:
+            previous.close()
+        records = ([self.store.record(record['id']) for record in self.store.overview()['birthdays']] if collection == 'birthdays'
+                   else self.store.records(favorites=True))
+        title = f'{date.today().month} 月生日好友' if collection == 'birthdays' else '收藏的好友'
+        dialog = QDialog(self)
+        dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        dialog.setWindowModality(Qt.WindowModality.WindowModal)
+        dialog.setWindowTitle(title)
+        dialog.resize(680, 460)
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(label(title, 'panelTitle'))
+        layout.addWidget(label(f'共 {len(records)} 位 · 点击好友查看详情', 'muted'))
+        table = QTableWidget(len(records), 3)
+        table.setObjectName('overviewCollection')
+        configure_table(table)
+        table.setHorizontalHeaderLabels(['好友', '出生信息', '标签'])
+        for row, record in enumerate(records):
+            name = QTableWidgetItem(record['name'] or '未命名好友')
+            name.setIcon(avatar_icon(record))
+            name.setData(Qt.ItemDataRole.UserRole, record['id'])
+            table.setItem(row, 0, name)
+            table.setItem(row, 1, QTableWidgetItem(record['birth'] or '未知'))
+            table.setItem(row, 2, QTableWidgetItem(' · '.join(record_labels(record)) or '未标记'))
+        table.setCurrentCell(-1, -1)
+        layout.addWidget(table, 1)
+        if not records:
+            layout.addWidget(label('本月暂无已知生日的好友。' if collection == 'birthdays' else '还没有收藏的好友。', 'muted'))
+        if collection == 'birthdays':
+            layout.addWidget(label('按已知出生月份列出全部好友；仅填写年份的档案不计入。', 'muted', True))
+        close_row = QHBoxLayout()
+        close_row.addStretch()
+        close_row.addWidget(button('关闭', dialog.close))
+        layout.addLayout(close_row)
+        def open_row(row, _column=0):
+            item = table.item(row, 0)
+            if item:
+                uid = item.data(Qt.ItemDataRole.UserRole)
+                dialog.accept()
+                self.open_friend(uid)
+        table.cellClicked.connect(open_row)
+        table.itemActivated.connect(lambda item: open_row(item.row()))
+        self.collection_dialog = dialog
+        dialog.finished.connect(lambda _: setattr(self, 'collection_dialog', None))
+        dialog.show()
 
     def build_groups(self):
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(16)
-        frame, content = card('以关系整理好友', '分组随好友资料建立。编辑好友时可以直接输入自定义分组；解散分组不会删除好友。')
-        content.addWidget(button('添加好友到新分组', self.add_group))
+        frame, content = card('用标签整理好友', '一位好友可以拥有多个标签。编辑资料时点击标签选择框，可检索、选择或新建标签；删除标签不会删除好友。')
+        content.addWidget(button('新建标签', self.add_group))
         layout.addWidget(frame)
         self.groups_table = QTableWidget(0, 2)
         configure_table(self.groups_table)
-        self.groups_table.setHorizontalHeaderLabels(['分组', '好友数'])
+        self.groups_table.setHorizontalHeaderLabels(['标签', '好友数'])
         layout.addWidget(self.groups_table, 1)
         actions = QHBoxLayout()
-        self.group_open = button('查看组内好友', self.open_selected_group, True)
+        self.group_open = button('查看好友', self.open_selected_group, True)
         self.group_rename = button('重命名', self.rename_selected_group)
-        self.group_dissolve = button('解散分组', self.dissolve_selected_group)
+        self.group_dissolve = button('删除标签', self.dissolve_selected_group)
         for item in (self.group_open, self.group_rename, self.group_dissolve):
             actions.addWidget(item)
         actions.addStretch()
         layout.addLayout(actions)
-        self.group_empty = label('还没有分组。在好友资料中填写分组即可开始整理。', 'muted', True)
+        self.group_empty = label('还没有标签。点击“新建标签”开始整理好友。', 'muted', True)
         layout.addWidget(self.group_empty)
         self.groups_table.itemSelectionChanged.connect(self.group_selection_changed)
         self.groups_table.doubleClicked.connect(self.open_selected_group)
@@ -83,9 +154,9 @@ class Pages:
         self.groups_table.setRowCount(len(groups))
         self.groups_table.setCurrentCell(-1, -1)
         for row, (name, count) in enumerate(groups):
-            item = QTableWidgetItem(name or '（未分组）')
+            item = QTableWidgetItem(name or '（未标记）')
             item.setData(Qt.ItemDataRole.UserRole, name)
-            item.setToolTip(name or '没有填写分组')
+            item.setToolTip(name or '尚未选择任何标签')
             self.groups_table.setItem(row, 0, item)
             self.groups_table.setItem(row, 1, QTableWidgetItem(str(count)))
             if name == selected:
@@ -97,7 +168,7 @@ class Pages:
     def group_selection_changed(self):
         name = self.selected_group()
         self.group_open.setEnabled(name is not None)
-        self.group_rename.setEnabled(name is not None)
+        self.group_rename.setEnabled(bool(name))
         self.group_dissolve.setEnabled(bool(name))
 
     def open_selected_group(self, *_):
@@ -117,15 +188,17 @@ class Pages:
             self.dissolve_group(name)
 
     def add_group(self):
-        name, ok = QInputDialog.getText(self, '新分组', '为新好友指定一个分组（保存好友后建立）：')
+        name, ok = QInputDialog.getText(self, '新建标签', '标签名称：')
         if ok and name.strip():
-            self.navigate('好友')
-            self.add(group=name.strip())
+            self.start_task('create_label', (name.strip(),),
+                            success=lambda _: self.notify('标签已创建，可在好友资料中选择。'), text='正在创建标签…')
 
     def build_statistics(self):
         self.stats_tabs = QTabWidget()
         self.stats_layouts = {}
-        for title in ('年龄', '兴趣', '分组', '生日月份'):
+        self._played_statistics = set()
+        self.stats_charts = {}
+        for title in ('标签', '年龄', '兴趣', '生日月份'):
             page, layout = scroll_content()
             self.stats_layouts[title] = layout
             self.stats_tabs.addTab(page, title)
@@ -133,21 +206,25 @@ class Pages:
 
     def refresh_statistics(self):
         data = self.store.overview()
+        modes = {key: chart.choice.currentIndex() for key, chart in self.stats_charts.items()}
         order = ['0–17 岁', '18–29 岁', '30–44 岁', '45–59 岁', '60 岁及以上', '年龄段不确定', '出生年份未知']
         plots = {
             '年龄': ('年龄分布', [(k, data['ages'].get(k, 0)) for k in order],
                 '依据当前日期及已知出生年份、月份计算可能年龄范围。仅当整个范围属于同一年龄段时计入，否则计为“年龄段不确定”；出生年份缺失单列未知。没有补造出生日期。'),
             '兴趣': ('兴趣分布', data['interests'].most_common(),
                 f"兴趣按逗号、顿号、分号或换行拆分；同一好友的相同兴趣仅计一次，可计入多个类别。{data['interests_unknown']} 位未填写兴趣，不用标签代替兴趣。"),
-            '分组': ('分组人数', [(k or '（未分组）', v) for k, v in data['groups'].most_common()],
-                '每位有效好友计入一个分组，空分组单列。回收站档案不计入统计。'),
+            '标签': ('各标签人数', [(k or '（未标记）', v) for k, v in data['groups'].most_common()],
+                '每位好友按拥有的标签分别计数，可计入多个标签；没有标签的好友单列“未标记”。图例比例按所有标签归属次数计算，相加为 100%；回收站档案不计入。'),
             '生日月份': ('生日月份', [(f'{m} 月', data['months'].get(m, 0)) for m in range(1, 13)] + [('月份未知', data['month_unknown'])],
                 '只有 YYYY-MM 格式计入相应月份；仅年份或出生信息为空的档案计入“月份未知”。')}
         for key, (title, values, description) in plots.items():
             layout = self.stats_layouts[key]
             clear_layout(layout)
             frame, content = card(title, f"统计范围：全部 {data['total']} 位有效好友")
-            content.addWidget(BarChart(values))
+            chart = DistributionChart(values, key, self._played_statistics)
+            chart.choice.setCurrentIndex(modes.get(key, 0))
+            self.stats_charts[key] = chart
+            content.addWidget(chart)
             layout.addWidget(frame)
             layout.addWidget(label(description, 'muted', True))
             layout.addStretch()
@@ -180,7 +257,7 @@ class Pages:
         self.theme_choice.setCurrentIndex(int(self.dark))
         self.theme_choice.currentIndexChanged.connect(lambda index: self.set_theme(bool(index)))
         content.addWidget(self.theme_choice)
-        self.reduce_motion = QCheckBox('减少动态效果（关闭点击波纹与弹性动画）')
+        self.reduce_motion = QCheckBox('减少动态效果（关闭点击波纹、图表入场与弹性动画）')
         self.reduce_motion.setChecked(bool(self.property('reduceMotion')))
         self.reduce_motion.toggled.connect(self.set_reduce_motion)
         content.addWidget(self.reduce_motion)

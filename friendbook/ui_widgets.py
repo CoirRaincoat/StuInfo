@@ -6,8 +6,10 @@ from PySide6.QtCore import Qt, Signal, QRectF
 from PySide6.QtGui import QPixmap, QPainter, QPainterPath, QColor, QIcon, QPalette, QPen, QGuiApplication
 from PySide6.QtWidgets import (QWidget, QLabel, QVBoxLayout, QHBoxLayout, QFrame,
     QPushButton, QLineEdit, QPlainTextEdit, QCheckBox, QFileDialog, QTabWidget,
-    QTableWidget, QTableWidgetItem, QHeaderView, QScrollArea, QAbstractItemView, QSizePolicy)
+    QTableWidget, QTableWidgetItem, QHeaderView, QScrollArea, QAbstractItemView, QSizePolicy,
+    QStyledItemDelegate, QStyleOptionViewItem, QStyle)
 from .core import validate_record, photo_bytes
+from .labels import record_labels, with_labels
 from .contact_fields import PROFILE_FIELDS
 
 
@@ -65,7 +67,17 @@ def clear_layout(layout):
             clear_layout(item.layout())
 
 
+class RowDelegate(QStyledItemDelegate):
+    def paint(self, painter, option, index):
+        option = QStyleOptionViewItem(option)
+        option.state &= ~QStyle.StateFlag.State_HasFocus
+        super().paint(painter, option, index)
+
+
 def configure_table(table):
+    # Keep specialised delegates (friend hover/drag); native tables use row feedback.
+    if type(table.itemDelegate()) is QStyledItemDelegate:
+        table.setItemDelegate(RowDelegate(table))
     table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
     table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
     table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -201,7 +213,7 @@ class Editor(QWidget):
     save_requested = Signal()
     cancel_requested = Signal()
 
-    def __init__(self, record, title='编辑好友', parent=None):
+    def __init__(self, record, title='编辑好友', parent=None, available_labels=()):
         super().__init__(parent)
         from .ui_contacts import ContactEditor
         self.original = copy.deepcopy(record)
@@ -229,8 +241,7 @@ class Editor(QWidget):
         basic.addLayout(photo_row)
         for key, title_, placeholder in [('name', '姓名', '未填写时显示“未命名好友”'),
                 ('birth', '出生信息', 'YYYY 或 YYYY-MM，未知留空'),
-                ('group', '分组', '输入自定义分组，如同学、同事'),
-                ('interests', '兴趣', '阅读、摄影、徒步……'), ('tags', '标签', '使用逗号分隔，如校园, 摄影')]:
+                ('interests', '兴趣', '阅读、摄影、徒步……'), ('tags', '备注', '简短备注，多条可用逗号分隔')]:
             box = QVBoxLayout()
             box.setSpacing(5)
             box.addWidget(label(title_, 'fieldLabel'))
@@ -239,9 +250,10 @@ class Editor(QWidget):
             self.fields[key] = field
             box.addWidget(field)
             basic.addLayout(box)
-        self.favorite = QCheckBox('加入收藏')
-        self.favorite.setChecked(record['favorite'])
-        basic.addWidget(self.favorite)
+        from .ui_labels import TagPicker
+        basic.addWidget(label('标签', 'fieldLabel'))
+        self.label_picker = TagPicker(available_labels, record_labels(record))
+        basic.addWidget(self.label_picker)
         self.profile_fields = {}
         extra = QWidget()
         extra_layout = QVBoxLayout(extra)
@@ -269,7 +281,7 @@ class Editor(QWidget):
         self.tabs.addTab(self.custom, '自定义')
         self.notes = QPlainTextEdit(record['notes'])
         self.notes.setPlaceholderText('记录近况、相识故事，或下次见面想聊的事情……')
-        self.tabs.addTab(self.notes, '备注')
+        self.tabs.addTab(self.notes, '详细备注')
         self.error = label('', 'error', True)
         self.error.hide()
         layout.addWidget(self.error)
@@ -315,8 +327,8 @@ class Editor(QWidget):
             if value or name in self.original['custom']:
                 custom[name] = value
         record.update(contacts=self.contacts.values(), custom=custom,
-                      notes=self.notes.toPlainText(), favorite=self.favorite.isChecked(), photo=self.photo)
-        return record
+                      notes=self.notes.toPlainText(), photo=self.photo)
+        return with_labels(record, self.label_picker.selected_labels())
 
     def validated(self):
         return validate_record(self.data())

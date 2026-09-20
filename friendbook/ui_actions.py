@@ -6,6 +6,7 @@ from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (QDialog, QVBoxLayout, QTableWidget, QTableWidgetItem,
     QHeaderView, QComboBox, QDialogButtonBox, QFileDialog, QInputDialog, QLabel)
 from .ui_widgets import label, configure_table
+from .labels import record_labels, with_labels
 
 
 class DataActions:
@@ -22,14 +23,15 @@ class DataActions:
         if not matches:
             self.notify('未发现同名或联系方式完全相同的其他档案。')
             return
-        names = [f"{r['name'] or '未命名好友'} · {r['group'] or '未分组'} · {r['id']}" for r in matches]
+        names = [f"{r['name'] or '未命名好友'} · {' / '.join(record_labels(r)) or '未设置标签'} · {r['id']}" for r in matches]
         selected, ok = QInputDialog.getItem(self, '选择合并来源', '保留当前好友，选择另一份疑似重复档案：', names, editable=False)
         if not ok:
             return
         source = matches[names.index(selected)]
         merged = copy.deepcopy(keep)
-        for key in ('birth', 'interests', 'group', 'photo'):
+        for key in ('birth', 'interests', 'photo'):
             merged[key] = keep[key] or source[key]
+        merged = with_labels(merged, record_labels(keep) + record_labels(source))
         merged['tags'] = list(dict.fromkeys(keep['tags'] + source['tags']))
         merged['favorite'] = keep['favorite'] or source['favorite']
         merged['notes'] = keep['notes'] + '\n\n[合入档案备注]\n' + source['notes']
@@ -39,7 +41,7 @@ class DataActions:
                 while destination in merged[key] and merged[key][destination] != value:
                     destination += '（合入）'
                 merged[key][destination] = value
-        conflicts = [k for k in ('name', 'birth', 'interests', 'group', 'photo')
+        conflicts = [k for k in ('name', 'birth', 'interests', 'photo')
                      if keep[k] and source[k] and keep[k] != source[k]]
         if conflicts:
             dialog = QDialog(self)
@@ -94,7 +96,7 @@ class DataActions:
 
     def _confirm_import(self, preview):
         if self.confirm('导入好友', f"文件中有 {preview['total']} 份有效档案；{preview['skipped']} 个已存在 ID 将跳过。\n新档案追加到末尾，同名但不同 ID 的资料保持独立。现有档案不会被替换。"):
-            self.start_task('import_prepared', (preview['records'],),
+            self.start_task('import_prepared', (preview['records'], preview.get('label_catalog', [])),
                             success=lambda result: self.notify(f'导入完成：新增 {result[0]} 份，跳过 {result[1]} 份。'),
                             text='正在导入好友…')
 
@@ -120,15 +122,15 @@ class DataActions:
 
     def rename_group(self, group):
         def choose():
-            name, ok = QInputDialog.getText(self, '修改分组名称', '新名称（留空表示移至未分组）：', text=group)
+            name, ok = QInputDialog.getText(self, '修改标签名称', '新名称（留空表示移除此标签）：', text=group)
             if not ok or name.strip() == group:
                 return
             destination = name.strip()
-            if destination in self.store.group_counts() and not self.confirm('合并到已有分组', '目标分组已存在。原分组内的好友将一起归入目标分组，继续？'):
+            if destination in self.store.group_counts() and not self.confirm('合并到已有标签', '目标标签已存在。好友将改用目标标签，其它标签保留，继续？'):
                 return
-            self.start_task('rename_group', (group, destination), success=lambda count: self.notify(f'已更新 {count} 位好友的分组。'), text='正在更新分组…')
+            self.start_task('rename_group', (group, destination), success=lambda count: self.notify(f'已更新 {count} 位好友的标签。'), text='正在更新标签…')
         self.request_leave(choose)
 
     def dissolve_group(self, group):
-        if self.confirm('解散分组', '该分组内的好友将移至“未分组”，好友档案不会删除。继续？'):
-            self.start_task('rename_group', (group, ''), success=lambda count: self.notify(f'已将 {count} 位好友移至未分组。'), text='正在更新分组…')
+        if self.confirm('移除标签', '将从所有好友中移除此标签，其它标签和好友资料都会保留。继续？'):
+            self.start_task('rename_group', (group, ''), success=lambda count: self.notify(f'已从 {count} 位好友中移除此标签。'), text='正在更新标签…')

@@ -35,6 +35,7 @@ def window(app, tmp_path):
     if widget._busy:
         wait_task(widget)
     widget.discard_editor()
+    widget.set_management(False)
     widget.close()
     widget.deleteLater()
     app.sendPostedEvents(None, QEvent.Type.DeferredDelete)
@@ -259,8 +260,8 @@ def test_management_select_all_filter_reset_batch_save_and_exit(window, monkeypa
     window.select_all.click()
     assert set(window.selected_batch_ids()) == set(ids)
     window.apply_batch('favorite', True)
-    wait_task(window)
-    assert all(r['favorite'] for r in window.store.records())
+    assert all(r['favorite'] for r in window.friend_source().records())
+    assert not any(r['favorite'] for r in window.store.records())
     window.set_filters(('Z', None, '', False, 0))
     assert not window.selected_batch_ids()
     assert not window.table.reorder_allowed
@@ -268,6 +269,9 @@ def test_management_select_all_filter_reset_batch_save_and_exit(window, monkeypa
     assert window.selected_batch_ids() == [ids[0]]
     monkeypatch.setattr(window, 'confirm', lambda *a: True)
     window.apply_batch('delete')
+    assert window.friend_source().counts() == (1, 1)
+    assert window.store.counts() == (2, 0)
+    window.finish_management()
     wait_task(window)
     assert window.store.counts() == (1, 1)
     assert window.store.record(ids[1])['name'] == 'A（虚构）'
@@ -290,8 +294,8 @@ def test_handle_drag_commits_only_after_release_and_cancel_is_safe(window):
     QTest.mouseMove(table.viewport(), end)
     assert [r['id'] for r in window.store.records()] == ids
     QTest.mouseRelease(table.viewport(), Qt.MouseButton.LeftButton, pos=end)
-    wait_task(window)
-    assert [r['id'] for r in window.store.records()] == ids[::-1]
+    assert [r['id'] for r in window.friend_source().records()] == ids[::-1]
+    assert [r['id'] for r in window.store.records()] == ids
     QApplication.processEvents()
     start = table.visualItemRect(table.item(0, 4)).center()
     QTest.mousePress(table.viewport(), Qt.MouseButton.LeftButton, pos=start)
@@ -299,6 +303,9 @@ def test_handle_drag_commits_only_after_release_and_cancel_is_safe(window):
     QTest.keyClick(table, Qt.Key.Key_Escape)
     QTest.mouseRelease(table.viewport(), Qt.MouseButton.LeftButton, pos=end)
     assert not window._busy
+    assert [r['id'] for r in window.friend_source().records()] == ids[::-1]
+    window.finish_management()
+    wait_task(window)
     assert [r['id'] for r in window.store.records()] == ids[::-1]
 
 
@@ -308,10 +315,12 @@ def test_management_save_failure_keeps_order_and_selection(window, monkeypatch):
     window.toggle_friend_check(ids[0])
     def fail(*a, **k):
         raise OSError('injected')
-    monkeypatch.setattr(Store, 'move_many', fail)
+    monkeypatch.setattr(Store, 'commit_management', fail)
     window.reorder_friends([ids[0]], None)
+    window.finish_management()
     wait_task(window)
     assert window.selected_batch_ids() == [ids[0]]
+    assert [r['id'] for r in window.friend_source().records()] == ids[::-1]
     assert [r['id'] for r in window.store.records()] == ids
     assert window.workspace.isEnabled()
 
@@ -422,17 +431,23 @@ def test_drag_multiple_and_autoscroll(window, delayed_events):
     previous_scroll = table.verticalScrollBar().value()
     QTest.mouseMove(table.viewport(), end)
     wait_until(lambda: table.verticalScrollBar().value() > previous_scroll, 'Edge autoscroll did not advance')
-    # Leave the scrolling edge and drop after a known row; compute expected order
-    # independently of the preview's _drag_slot, which changes while scrolling.
-    end = table.visualItemRect(table.item(6, 4)).bottomLeft() + QPoint(15, -2)
+    # Leave the scrolling edge and drop after the visibly displaced sixth row.
+    # The underlying model stays unchanged during preview, so its native cell
+    # rect is no longer this row's on-screen position. Expected order still uses
+    # the independently known next UUID, not the preview's insertion slot.
+    end = table.preview_row_rect(6).bottomLeft() + QPoint(15, -2)
     assert table.viewport().rect().contains(end)
     QTest.mouseMove(table.viewport(), end)
     QTest.mouseRelease(table.viewport(), Qt.MouseButton.LeftButton, pos=end)
     wait_task(window)
     remaining = [uid for uid in ids if uid not in (ids[0], ids[2])]
     at = remaining.index(ids[7])
-    assert [r['id'] for r in window.store.records()] == remaining[:at] + [ids[0], ids[2]] + remaining[at:]
+    assert [r['id'] for r in window.friend_source().records()] == remaining[:at] + [ids[0], ids[2]] + remaining[at:]
+    assert [r['id'] for r in window.store.records()] == ids
     assert set(window.selected_batch_ids()) == {ids[0], ids[2]}
+    window.finish_management()
+    wait_task(window)
+    assert [r['id'] for r in window.store.records()] == remaining[:at] + [ids[0], ids[2]] + remaining[at:]
 
 
 @pytest.mark.parametrize('interrupt', ['release', 'escape', 'focus-out', 'exit-management'])

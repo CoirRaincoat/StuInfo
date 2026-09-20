@@ -107,7 +107,7 @@ window.edit()
 capture('editor')
 window.discard_editor()
 window.navigate('统计')
-for index, name in ((1, 'interests'), (2, 'groups'), (3, 'birth-months')):
+for index, name in ((0, 'labels'), (1, 'ages'), (2, 'interests'), (3, 'birth-months')):
     window.stats_tabs.setCurrentIndex(index)
     capture('stats-' + name)
 window.close()

@@ -1,5 +1,6 @@
 """Row-level interaction and handle-only dragging; all mutations are UUID commands."""
-from PySide6.QtCore import Qt, QTimer, Signal, QPoint, QRect, QEasingCurve, QVariantAnimation, QEvent
+from PySide6.QtCore import (Qt, QTimer, Signal, QPoint, QRect, QEasingCurve,
+                           QVariantAnimation, QEvent, QElapsedTimer)
 from PySide6.QtGui import QPainter, QColor, QPen, QCursor
 from PySide6.QtWidgets import (QTableWidget, QStyledItemDelegate, QStyleOptionViewItem,
                                QStyle, QLabel)
@@ -13,7 +14,7 @@ class FriendDelegate(QStyledItemDelegate):
         self.initStyleOption(opt, index)
         # Keep keyboard focus on the table without drawing a border around one cell.
         opt.state &= ~(QStyle.StateFlag.State_MouseOver | QStyle.StateFlag.State_HasFocus)
-        if index.row() == view.hovered_row:
+        if index.row() == view.hovered_row and not view._drag_ids:
             opt.state |= QStyle.StateFlag.State_MouseOver
         if view.management:
             uid = view.item(index.row(), 0).data(Qt.ItemDataRole.UserRole)
@@ -61,6 +62,20 @@ class FriendsTable(QTableWidget):
         self._drag_slot = None
         self._ghost = None
         self._follow_y = 0.0
+        # Preview coordinates are independent of the model. UUIDs keep the rows
+        # stable even when several, non-adjacent friends are lifted together.
+        self._preview_rows = []
+        self._dragged_set = set()
+        self._remaining_rows = []
+        self._remaining_tops = []
+        self._row_positions = {}
+        self._row_targets = {}
+        self._row_velocity = {}
+        self._row_heights = {}
+        self._gap_index = None
+        self._gap_height = 0
+        self._returning = False
+        self._frame_clock = QElapsedTimer()
         self._long_press = QTimer(self)
         self._long_press.setSingleShot(True)
         self._long_press.setInterval(180)
@@ -87,11 +102,21 @@ class FriendsTable(QTableWidget):
     def row_rect(self, row):
         return QRect(0, self.rowViewportPosition(row), self.viewport().width(), self.rowHeight(row))
 
+    def preview_row_rect(self, row):
+        """Visible row geometry while the unchanged model is being previewed."""
+        uid = self._uid(row)
+        if uid not in self._row_positions:
+            return self.row_rect(row)
+        return QRect(0, round(self._row_positions[uid]) - self.verticalScrollBar().value(),
+                     self.viewport().width(), self._row_heights[uid])
+
     def _uid(self, row):
         item = self.item(row, 0) if row >= 0 else None
         return item.data(Qt.ItemDataRole.UserRole) if item else None
 
     def mousePressEvent(self, event):
+        if self._returning:
+            self.cancel_drag()
         pos = event.position().toPoint()
         row = self.rowAt(pos.y())
         uid = self._uid(row)
@@ -144,6 +169,22 @@ class FriendsTable(QTableWidget):
         row = next(row for row in range(self.rowCount()) if self._uid(row) == self._pressed_handle)
         # A local visual snapshot only; the model and linked list stay unchanged until drop succeeds.
         pixmap = self.viewport().grab(self.row_rect(row))
+        self._preview_rows = [(index, self._uid(index)) for index in range(self.rowCount())]
+        self._dragged_set = set(self._drag_ids)
+        self._remaining_rows = [(index, uid) for index, uid in self._preview_rows
+                                if uid not in self._dragged_set]
+        self._row_positions = {uid: float(self.verticalHeader().sectionPosition(index))
+                               for index, uid in self._preview_rows}
+        self._row_targets = self._row_positions.copy()
+        self._row_velocity = {uid: 0.0 for _, uid in self._preview_rows}
+        self._row_heights = {uid: self.rowHeight(index) for index, uid in self._preview_rows}
+        self._remaining_tops = [0]
+        for _, uid in self._remaining_rows:
+            self._remaining_tops.append(self._remaining_tops[-1] + self._row_heights[uid])
+        self._gap_height = sum(self._row_heights[uid] for uid in self._drag_ids)
+        self._gap_index = sum(index < row for index, _ in self._remaining_rows)
+        self._returning = False
+        self._set_preview_targets()
         self._ghost = QLabel(self.viewport())
         self._ghost.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         self._ghost.setPixmap(pixmap)
@@ -161,6 +202,7 @@ class FriendsTable(QTableWidget):
         if motion_enabled(self):
             self._lift.start()
         self._drag_timer.start()
+        self._frame_clock.start()
         self._update_slot()
 
     def _place_ghost(self):
@@ -169,6 +211,31 @@ class FriendsTable(QTableWidget):
             self._ghost.move(round(4 * lift), round(self._follow_y - 2 * lift))
 
     def _drag_frame(self):
+        if not self._preview_rows:
+            return
+        elapsed = self._frame_clock.restart() / 1000 if self._frame_clock.isValid() else .016
+        # A damped spring gives both opening and closing gaps a slight settling
+        # motion. Clamp a busy event loop's step so rows never shoot off-screen.
+        elapsed = min(.032, max(.001, elapsed))
+        moving = False
+        for _, uid in self._preview_rows:
+            target = self._row_targets[uid]
+            position, velocity = self._row_positions[uid], self._row_velocity[uid]
+            if motion_enabled(self):
+                velocity += ((target - position) * 300 - velocity * 28) * elapsed
+                position += velocity * elapsed
+                if abs(target - position) < .15 and abs(velocity) < .5:
+                    position, velocity = target, 0.0
+            else:
+                position, velocity = target, 0.0
+            self._row_positions[uid], self._row_velocity[uid] = position, velocity
+            moving = moving or position != target
+        self.viewport().update()
+        if self._returning:
+            if not moving:
+                self._clear_preview()
+                self._drag_timer.stop()
+            return
         if not self._drag_ids or not self._ghost:
             return
         y, height = self._pointer.y(), self.viewport().height()
@@ -184,12 +251,49 @@ class FriendsTable(QTableWidget):
     def _update_slot(self):
         if not self._drag_ids:
             return
-        row = self.rowAt(self._pointer.y())
-        if row < 0:
-            self._drag_slot = 0 if self._pointer.y() < 0 else self.rowCount()
-        else:
-            self._drag_slot = row + int(self._pointer.y() > self.row_rect(row).center().y())
+        remaining = self._remaining_rows
+        y = self._pointer.y() + self.verticalScrollBar().value()
+        slot = self._gap_index
+        # Compare with the rows bordering the current gap, never with their
+        # transient spring positions. The gap itself is a stable drop region;
+        # a stationary pointer cannot make neighboring rows oscillate.
+        while slot < len(remaining):
+            uid = remaining[slot][1]
+            if y <= self._row_targets[uid] + self._row_heights[uid] / 2:
+                break
+            slot += 1
+        while slot > 0:
+            uid = remaining[slot - 1][1]
+            # Compute the compact position: rows already passed by the first
+            # loop have not received their new target until below.
+            top = self._remaining_tops[slot - 1]
+            if y >= top + self._row_heights[uid] / 2:
+                break
+            slot -= 1
+        if slot != self._gap_index:
+            self._gap_index = slot
+            self._set_preview_targets()
+        self._drag_slot = remaining[slot][0] if slot < len(remaining) else self.rowCount()
         self.viewport().update()
+
+    def _set_preview_targets(self):
+        top = 0
+        for index, (_, uid) in enumerate(self._remaining_rows):
+            if index == self._gap_index:
+                top += self._gap_height
+            self._row_targets[uid] = float(top)
+            top += self._row_heights[uid]
+        if not motion_enabled(self):
+            self._row_positions.update(self._row_targets)
+            self._row_velocity = dict.fromkeys(self._row_velocity, 0.0)
+
+    def gap_rect(self):
+        """The actual reserved insertion space, in viewport coordinates."""
+        if self._gap_index is None:
+            return QRect()
+        top = self._remaining_tops[self._gap_index]
+        return QRect(4, top - self.verticalScrollBar().value(),
+                     max(0, self.viewport().width() - 8), self._gap_height)
 
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton and self._pressed_handle:
@@ -200,8 +304,9 @@ class FriendsTable(QTableWidget):
             anchor = next((uid for uid in order[slot:] if uid not in dragged), None) if slot is not None else None
             remaining = [uid for uid in order if uid not in dragged]
             at = remaining.index(anchor) if anchor else len(remaining)
-            changed = remaining[:at] + dragged + remaining[at:] != order
-            self.cancel_drag()
+            changed = (remaining[:at] + dragged + remaining[at:] != order
+                       and (event.position().toPoint() - self._press_pos).manhattanLength() >= 8)
+            self.cancel_drag(animate=not (inside and changed))
             if inside and dragged and slot is not None and changed:
                 self.reorder_requested.emit(dragged, anchor)
             event.accept()
@@ -219,7 +324,7 @@ class FriendsTable(QTableWidget):
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key.Key_Escape and self._pressed_handle:
-            self.cancel_drag()
+            self.cancel_drag(animate=True)
             return
         if self.management and event.key() == Qt.Key.Key_Space:
             uid = self._uid(self.currentRow())
@@ -237,18 +342,47 @@ class FriendsTable(QTableWidget):
             self.cancel_drag()
         return super().event(event)
 
-    def cancel_drag(self):
+    def cancel_drag(self, animate=False):
         self._long_press.stop()
-        self._drag_timer.stop()
         self._lift.stop()
+        returning = bool(animate and self._drag_ids and motion_enabled(self) and self.isVisible())
+        if returning:
+            top = self.gap_rect().top() + self.verticalScrollBar().value()
+            for uid in self._drag_ids:
+                self._row_positions[uid] = float(top)
+                top += self._row_heights[uid]
+            self._row_targets = {uid: float(self.verticalHeader().sectionPosition(row))
+                                 for row, uid in self._preview_rows}
         self._pressed_handle = None
         self._drag_ids = []
         self._drag_slot = None
+        self._gap_index = None
         if self._ghost:
             self._ghost.hide()
             self._ghost.deleteLater()
             self._ghost = None
+        if returning:
+            self._returning = True
+            self._frame_clock.start()
+            self._drag_timer.start()
+        else:
+            self._drag_timer.stop()
+            self._clear_preview()
         self.viewport().setCursor(Qt.CursorShape.ArrowCursor)
+        self.viewport().update()
+
+    def _clear_preview(self):
+        self._preview_rows = []
+        self._dragged_set.clear()
+        self._remaining_rows = []
+        self._remaining_tops = []
+        self._row_positions.clear()
+        self._row_targets.clear()
+        self._row_velocity.clear()
+        self._row_heights.clear()
+        self._gap_index = None
+        self._gap_height = 0
+        self._returning = False
         self.viewport().update()
 
     def leaveEvent(self, event):
@@ -258,6 +392,8 @@ class FriendsTable(QTableWidget):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        if self._ghost:
+            self._ghost.resize(max(0, self.viewport().width() - 8), self._ghost.height())
         pos = self.viewport().mapFromGlobal(QCursor.pos())
         self.hovered_row = self.rowAt(pos.y()) if self.viewport().rect().contains(pos) else -1
 
@@ -267,9 +403,28 @@ class FriendsTable(QTableWidget):
 
     def paintEvent(self, event):
         super().paintEvent(event)
-        if self._drag_slot is not None:
-            y = self.rowViewportPosition(self._drag_slot) if self._drag_slot < self.rowCount() else (
-                self.rowViewportPosition(self.rowCount() - 1) + self.rowHeight(self.rowCount() - 1))
-            painter = QPainter(self.viewport())
-            painter.setPen(QPen(QColor('#9281b8'), 3))
-            painter.drawLine(8, y, self.viewport().width() - 8, y)
+        if not self._preview_rows:
+            return
+        painter = QPainter(self.viewport())
+        painter.fillRect(self.viewport().rect(), self.viewport().palette().base())
+        gap = self.gap_rect().adjusted(0, 3, 0, -3)
+        if not gap.isEmpty():
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            painter.setPen(QPen(QColor('#9281b8'), 1, Qt.PenStyle.DashLine))
+            painter.setBrush(QColor(146, 129, 184, 20))
+            painter.drawRoundedRect(gap, 6, 6)
+        offset = self.verticalScrollBar().value()
+        for row, uid in self._preview_rows:
+            if uid in self._dragged_set and not self._returning:
+                continue
+            top, height = round(self._row_positions[uid]) - offset, self._row_heights[uid]
+            if top + height < 0 or top > self.viewport().height():
+                continue
+            painter.fillRect(QRect(0, top, self.viewport().width(), height),
+                             self.viewport().palette().base())
+            for column in range(self.columnCount()):
+                option = QStyleOptionViewItem()
+                self.initViewItemOption(option)
+                option.rect = QRect(self.columnViewportPosition(column), top,
+                                    self.columnWidth(column), height)
+                self.itemDelegate().paint(painter, option, self.model().index(row, column))
