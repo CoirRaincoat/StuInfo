@@ -1,0 +1,7 @@
+# Windows directory build; user data are never stored in this distribution.
+a = Analysis(['main.py'], pathex=[], binaries=[], datas=[], hiddenimports=[],
+             hookspath=[], hooksconfig={}, runtime_hooks=[], excludes=['tkinter'], noarchive=False)
+pyz = PYZ(a.pure)
+exe = EXE(pyz, a.scripts, [], exclude_binaries=True, name='Friendbook',
+          debug=False, bootloader_ignore_signals=False, strip=False, upx=False, console=False)
+coll = COLLECT(exe, a.binaries, a.datas, strip=False, upx=False, name='Friendbook')
