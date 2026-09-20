@@ -1,6 +1,22 @@
 # 交付验证记录
 
-环境：本机 Windows x64，Windows build 26200，Python 3.11.9，PySide6-Essentials 6.11.2，Pillow 12.3.0，PyInstaller 6.22.3。实际依赖版本见根目录 `requirements-lock.txt`。
+## 2026-09-20 列表管理、资料扩展与动效
+
+本轮环境为 Linux、Python 3.12.14、PySide6-Essentials 6.11.2、pytest 9.1.1、Pillow 12.3.0。运行 `python -m pytest -q`，**74 项全部通过**。GUI 自动化使用 Qt offscreen，不代表 Windows 原生窗口或 exe 的实机验收。
+
+- 批量管理：部分选择、全选当前结果、筛选时清空选择、批量收藏 / 分组 / 移入回收站、所选 JSON 导出；ID 无效时整体拒绝，事务失败时内存与磁盘保持原样。
+- 顺序调整：真实 Qt 鼠标长按、单人 / 多选拖动、边缘自动滚动、取消及保存失败；60 次随机多选移动与独立顺序参考逐步对照，并检查重启后的顺序。
+- 资料兼容：籍贯等常用资料、电话 / QQ / 微信 / 邮箱 / 其他渠道、多项编号与单项不编号、旧联系方式标签和值无损往返。schema 保持 1；导出、导入和备份继续包含新增资料及照片。
+- 界面行为：初始全宽列表、可打断的详情抽屉、整行悬停和点击波纹、快速切页、草稿保护、持久化的“减少动态效果”；联系方式标签不覆盖输入框。
+- 视觉检查：运行 `scripts/visual_interactions.py`，检查浅深主题，1280×820、900×650、820×580 逻辑像素窗口，以及 100% / 150% 缩放。检查管理模式、拖动浮层、详情、编辑和概览四卡同排；修正高 DPI 头像绘制与联系方式标签布局。截图仅使用独立临时目录中的虚构资料，保存于 `docs/screenshots/interactions/`。
+
+复现界面检查：`python scripts/visual_interactions.py`；Linux 缺中文字体时可用 `--font /path/to/font.otf` 提供字体，`--out` 可指定截图目录。150% 缩放可在启动前设置 `QT_SCALE_FACTOR=1.5`。
+
+边界：本轮未重新构建或运行 Windows exe，未在触摸屏或所有系统缩放组合上实机测试。原生文件对话框保留系统行为；拖动只允许在无筛选的原始顺序中使用。没有访问、迁移或替换真实用户数据库。
+
+## 既有 Windows 交付记录
+
+以下为此前 Windows 交付阶段的记录，不是本轮 Linux 验证结论。环境：本机 Windows x64，Windows build 26200，Python 3.11.9，PySide6-Essentials 6.11.2，Pillow 12.3.0，PyInstaller 6.22.3。实际依赖版本见根目录 `requirements-lock.txt`。
 
 ## 2026-09-20 数据目录调整
 

@@ -191,6 +191,57 @@ class Store:
     def move(self, uid, anchor, before=False):
         self.change(lambda b, t: b.move(uid, anchor, before))
 
+    def _active_ids(self, uids):
+        """Validate the entire selection before touching a candidate or a file."""
+        if not isinstance(uids, (list, tuple)) or not uids or any(not isinstance(u, str) for u in uids):
+            raise ValueError('请先选择有效好友')
+        selected = set(uids)
+        if len(selected) != len(uids) or not selected.issubset(self.book.index):
+            raise ValueError('所选好友已发生变化，请刷新后重新选择')
+        return selected
+
+    def move_many(self, uids, anchor=None, before=True):
+        selected = self._active_ids(uids)
+        if anchor in selected or (anchor is not None and anchor not in self.book.index):
+            raise ValueError('移动目标无效，请重新选择位置')
+        # This is an ID command buffer, not an alternate owner of runtime records.
+        ordered = [r['id'] for r in self.book if r['id'] in selected]
+        def op(book, trash):
+            target = anchor
+            for uid in ordered:
+                book.move(uid, target, before)
+                if not before:
+                    target = uid
+            return len(ordered)
+        return self.change(op)
+
+    def batch_update(self, uids, action, value=None):
+        selected = self._active_ids(uids)
+        if action not in ('favorite', 'group', 'delete'):
+            raise ValueError('不支持的批量操作')
+        if action == 'favorite' and type(value) is not bool:
+            raise ValueError('收藏状态无效')
+        if action == 'group':
+            if not isinstance(value, str) or len(value) > 20000:
+                raise ValueError('分组名称无效或过长')
+            value = value.strip()
+        ordered = [r['id'] for r in self.book if r['id'] in selected]
+        def op(book, trash):
+            for uid in ordered:
+                if action == 'delete':
+                    trash[uid] = book.remove(uid)
+                else:
+                    record = book.get(uid)
+                    book.update(uid, dict(record, **{action: value, 'version': record['version'] + 1}))
+            return len(ordered)
+        return self.change(op)
+
+    def export_selected(self, path, uids):
+        selected = self._active_ids(uids)
+        self._safe_destination(path)
+        atomic_json(path, dict(schema=1, active=[r for r in self.book if r['id'] in selected], trash=[]))
+        return len(selected)
+
     def search(self, query='', group='', tag='', favorites=False):
         terms = query.casefold().split()
         for r in self.book:

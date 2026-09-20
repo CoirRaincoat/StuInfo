@@ -2,17 +2,21 @@
 from PySide6.QtCore import Qt, QSettings, QTimer, QSize
 from PySide6.QtGui import QAction, QKeySequence, QFont
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QFrame, QVBoxLayout,
-    QHBoxLayout, QStackedWidget, QListWidget, QLineEdit, QComboBox, QCheckBox, QSplitter,
-    QTableWidget, QTableWidgetItem, QMessageBox, QMenu, QToolButton, QProgressBar)
+    QHBoxLayout, QListWidget, QLineEdit, QComboBox, QCheckBox,
+    QTableWidgetItem, QMessageBox, QMenu, QToolButton, QProgressBar, QHeaderView)
 from .core import new_record
 from .ui_widgets import (label, button, scroll_content, clear_layout, Avatar, Editor, avatar_icon,
                          configure_table, friendly_error, apply_theme)
 from .ui_tasks import StoreTask
 from .ui_pages import Pages
 from .ui_actions import DataActions
+from .ui_management import ListManagement
+from .ui_friend_list import FriendsTable
+from .ui_motion import AnimatedStack, DrawerWorkspace, ClickFeedback, Ripple, TransitionCover, motion_enabled
+from .contact_fields import PROFILE_FIELDS, grouped_contacts, contact_caption
 
 
-class Window(QMainWindow, Pages, DataActions):
+class Window(QMainWindow, Pages, DataActions, ListManagement):
     PAGE_NAMES = ('概览', '好友', '分组', '统计', '导入与备份', '回收站', '设置', '链表教学')
     DESCRIPTIONS = dict(zip(PAGE_NAMES, (
         '看见每一份关系，也留意那些还未知的信息。', '整理资料，记录共同的兴趣与故事。',
@@ -25,6 +29,10 @@ class Window(QMainWindow, Pages, DataActions):
         self.store = store
         self.settings = QSettings(str(store.path.parent / 'settings.ini'), QSettings.Format.IniFormat)
         self.dark = self.settings.value('dark', False, bool)
+        self.setProperty('reduceMotion', self.settings.value('reduce_motion', False, bool))
+        self.click_feedback = ClickFeedback(self)
+        self.managing = False
+        self._checked_ids = set()
         self.page_name = '好友'
         self._selected_id = None
         self.editor = None
@@ -87,7 +95,7 @@ class Window(QMainWindow, Pages, DataActions):
         self.progress.setTextVisible(False)
         self.progress.hide()
         center.addWidget(self.progress)
-        self.pages = QStackedWidget()
+        self.pages = AnimatedStack()
         center.addWidget(self.pages, 1)
         root.addLayout(center, 1)
         friends = self.build_friends()
@@ -122,6 +130,8 @@ class Window(QMainWindow, Pages, DataActions):
         search_row.addWidget(self.favorites)
         self.filters_button = button('筛选与排序', self.toggle_filters)
         search_row.addWidget(self.filters_button)
+        self.management_button = button('☰ 管理列表', self.toggle_management)
+        search_row.addWidget(self.management_button)
         layout.addLayout(search_row)
         self.filters_widget = QWidget()
         filter_row = QHBoxLayout(self.filters_widget)
@@ -141,18 +151,23 @@ class Window(QMainWindow, Pages, DataActions):
         self.filters_widget.hide()
         self.hint = label('', 'muted', True)
         layout.addWidget(self.hint)
-        self.splitter = QSplitter()
-        self.splitter.setChildrenCollapsible(False)
+        layout.addWidget(self.build_management_bar())
+        self.splitter = DrawerWorkspace()
         layout.addWidget(self.splitter, 1)
         self.list_area = QFrame()
         self.list_area.setObjectName('card')
         list_layout = QVBoxLayout(self.list_area)
         list_layout.setContentsMargins(8, 2, 8, 8)
-        self.table = QTableWidget(0, 4)
+        self.table = FriendsTable()
         configure_table(self.table)
         self.table.setHorizontalHeaderLabels(['好友', '分组', '兴趣', '出生信息'])
-        self.table.setIconSize(QSize(36, 36))
-        self.table.verticalHeader().setDefaultSectionSize(56)
+        self.table.setIconSize(QSize(32, 32))
+        self.table.verticalHeader().setDefaultSectionSize(46)
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
+        self.table.setColumnWidth(0, 225)
+        self.table.toggle_requested.connect(self.toggle_friend_check)
+        self.table.select_all_requested.connect(self.toggle_all_friends)
+        self.table.reorder_requested.connect(self.reorder_friends)
         self.table.itemSelectionChanged.connect(self._selection_changed)
         self.table.itemClicked.connect(self._item_clicked)
         self.table.doubleClicked.connect(self.edit)
@@ -177,14 +192,13 @@ class Window(QMainWindow, Pages, DataActions):
         panel_layout.setContentsMargins(0, 0, 0, 0)
         self.back_button = button('← 返回好友列表', self.back_to_list)
         panel_layout.addWidget(self.back_button)
-        self.panel_stack = QStackedWidget()
+        self.panel_stack = AnimatedStack()
         panel_layout.addWidget(self.panel_stack, 1)
         self.detail, self.detail_layout = scroll_content()
         self.detail.widget().setObjectName('panelContent')
         self.detail_layout.setContentsMargins(20, 18, 20, 18)
         self.panel_stack.addWidget(self.detail)
         self.splitter.addWidget(self.detail_panel)
-        self.splitter.setSizes([600, 410])
         self.search_timer = QTimer(self)
         self.search_timer.setSingleShot(True)
         self.search_timer.setInterval(250)
@@ -226,6 +240,10 @@ class Window(QMainWindow, Pages, DataActions):
 
     def _set_page(self, name):
         old = self.page_name
+        shared_page = self.pages.currentWidget() == self.page_widgets[name]
+        snapshot = self.pages.currentWidget().grab() if old != name and shared_page and motion_enabled(self) else None
+        if self.managing and name != '好友':
+            self.set_management(False)
         self.page_name = name
         self.nav.blockSignals(True)
         self.nav.setCurrentRow(self.PAGE_NAMES.index(name))
@@ -234,6 +252,7 @@ class Window(QMainWindow, Pages, DataActions):
         self.subtitle.setText(self.DESCRIPTIONS[name])
         self.pages.setCurrentWidget(self.page_widgets[name])
         self.add_button.setVisible(name in ('好友', '概览'))
+        self.management_button.setVisible(name == '好友' and not self.managing)
         if name in ('好友', '回收站'):
             if old != name:
                 self._selected_id = None
@@ -242,6 +261,8 @@ class Window(QMainWindow, Pages, DataActions):
             self.refresh_friends()
         self.refresh_current_page()
         self._resize_workspace()
+        if snapshot is not None:
+            TransitionCover(self.pages, snapshot)
 
     def request_leave(self, action):
         if self._busy:
@@ -344,6 +365,8 @@ class Window(QMainWindow, Pages, DataActions):
             self.request_leave(lambda: self.set_filters(values))
 
     def set_filters(self, values):
+        if values != self._filters:
+            self._checked_ids.clear()
         self._filters = values
         self._write_filters(values)
         if values[1] is not None or values[2] or values[4]:
@@ -361,6 +384,12 @@ class Window(QMainWindow, Pages, DataActions):
             key = 'name' if sort == 1 else 'birth'
             records.sort(key=lambda r: (not bool(r[key]), r[key].casefold(), r['id']))
         self._visible_records = records
+        self.table.configure_management(self.managing, self._checked_ids, self.can_reorder())
+        self.table.setHorizontalHeaderLabels(['好友', '分组', '兴趣', '出生信息'] + (['移动'] if self.managing else []))
+        if self.managing:
+            self.table.horizontalHeader().setMinimumSectionSize(38)
+            self.table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.Fixed)
+            self.table.setColumnWidth(4, 40)
         self.table.blockSignals(True)
         self.table.setRowCount(len(records))
         self.table.setCurrentCell(-1, -1)
@@ -374,10 +403,19 @@ class Window(QMainWindow, Pages, DataActions):
                 item.setToolTip(value)
                 if col == 0:
                     item.setIcon(avatar_icon(record, self.table.iconSize().width()))
+                    if self.managing:
+                        item.setCheckState(Qt.CheckState.Checked if record['id'] in self._checked_ids else Qt.CheckState.Unchecked)
                     font = item.font()
                     font.setWeight(QFont.Weight.DemiBold)
                     item.setFont(font)
                 self.table.setItem(row, col, item)
+            if self.managing:
+                handle = QTableWidgetItem('')
+                handle.setData(Qt.ItemDataRole.UserRole, record['id'])
+                handle.setToolTip('长按或拖动：移动此好友；若已勾选，整体移动所有已选好友' if self.can_reorder() else
+                                  '拖动仅用于全部好友的原始顺序，请先重置筛选与排序')
+                handle.setData(Qt.ItemDataRole.AccessibleTextRole, handle.toolTip())
+                self.table.setItem(row, 4, handle)
             if record['id'] == self._selected_id:
                 self.table.selectRow(row)
                 visible = True
@@ -391,6 +429,9 @@ class Window(QMainWindow, Pages, DataActions):
         self.tag.setEnabled(not trash)
         total = self.store.counts()[int(trash)]
         self.hint.setText(f'显示 {len(records)} / {total} 位  ·  ' + ('还原后置于原始顺序末尾' if trash else ('临时排序仅改变显示顺序' if sort else '原始顺序')))
+        if self.managing:
+            self.hint.setText(self.hint.text() + (' · 拖动右侧手柄调整顺序；Esc 取消拖动' if self.can_reorder() else
+                                                 ' · 当前仅可批量操作；重置筛选和排序后可拖动'))
         self.empty_title.setVisible(not records)
         self.empty_message.setVisible(not records)
         self.empty_box.setVisible(not records)
@@ -401,15 +442,20 @@ class Window(QMainWindow, Pages, DataActions):
         if not self.editor:
             self.render_detail()
         self.update_actions()
+        self.update_management_selection()
         self._resize_workspace()
 
     def _selection_changed(self):
+        if self.managing:
+            return
         uid = self.table_uid()
         if uid != self._selected_id:
             self._select_table(self._selected_id)
             self.request_leave(lambda: self.select_uid(uid))
 
     def _item_clicked(self, item):
+        if self.managing:
+            return
         uid = item.data(Qt.ItemDataRole.UserRole)
         if uid == self._selected_id and not self.compact_detail:
             self.request_leave(lambda: self.select_uid(uid))
@@ -425,6 +471,8 @@ class Window(QMainWindow, Pages, DataActions):
         self.table.blockSignals(False)
 
     def select_uid(self, uid):
+        if self.managing:
+            return
         self._selected_id = uid if uid in {r['id'] for r in self._visible_records} else None
         self._select_table(self._selected_id)
         self.compact_detail = bool(self._selected_id)
@@ -472,16 +520,35 @@ class Window(QMainWindow, Pages, DataActions):
             item = label(value, '', True)
             item.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
             self.detail_layout.addWidget(item)
-        for title, key in [('联系方式', 'contacts'), ('自定义属性', 'custom')]:
-            self.detail_layout.addSpacing(6)
-            self.detail_layout.addWidget(label(title, 'sectionTitle'))
-            if not record[key]:
-                self.detail_layout.addWidget(label('未填写', 'muted'))
-            for name, value in record[key].items():
-                self.detail_layout.addWidget(label(name, 'fieldLabel', True))
-                item = label(value or '未填写', '', True)
+        if any(record['custom'].get(k) for k in PROFILE_FIELDS):
+            self.detail_layout.addWidget(label('更多资料', 'sectionTitle'))
+            for key in PROFILE_FIELDS:
+                if record['custom'].get(key):
+                    self.detail_layout.addWidget(label(key, 'fieldLabel'))
+                    self.detail_layout.addWidget(label(record['custom'][key], '', True))
+        self.detail_layout.addWidget(label('联系方式', 'sectionTitle'))
+        if not record['contacts']:
+            self.detail_layout.addWidget(label('未填写', 'muted'))
+        for kind, entries in grouped_contacts(record['contacts']).items():
+            if not entries:
+                continue
+            self.detail_layout.addWidget(label(kind, 'fieldLabel'))
+            for index, (name, value) in enumerate(entries):
+                caption = contact_caption(kind, index, len(entries), name)
+                text = (caption + '：' if caption != kind or len(entries) > 1 else '') + (value or '未填写')
+                item = label(text, '', True)
                 item.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
                 self.detail_layout.addWidget(item)
+        custom = {name: value for name, value in record['custom'].items() if name not in PROFILE_FIELDS}
+        self.detail_layout.addSpacing(6)
+        self.detail_layout.addWidget(label('自定义属性', 'sectionTitle'))
+        if not custom:
+            self.detail_layout.addWidget(label('未填写', 'muted'))
+        for name, value in custom.items():
+            self.detail_layout.addWidget(label(name, 'fieldLabel', True))
+            item = label(value or '未填写', '', True)
+            item.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            self.detail_layout.addWidget(item)
         self.detail_layout.addSpacing(6)
         self.detail_layout.addWidget(label('备注', 'sectionTitle'))
         notes = label(record['notes'] or '还没有备注。', '', True)
@@ -507,6 +574,8 @@ class Window(QMainWindow, Pages, DataActions):
         if before is not None and (not anchor or self.page_name != '好友'):
             return
         def begin():
+            if self.managing:
+                self.set_management(False)
             if self.page_name != '好友':
                 self._set_page('好友')
             record = new_record()
@@ -515,7 +584,7 @@ class Window(QMainWindow, Pages, DataActions):
         self.request_leave(begin)
 
     def edit(self, *_):
-        if self._busy or not self._selected_id or self.editor:
+        if self._busy or self.managing or not self._selected_id or self.editor:
             return
         uid = self._selected_id
         if self.page_name == '回收站':
@@ -592,6 +661,8 @@ class Window(QMainWindow, Pages, DataActions):
 
     def open_friend(self, uid):
         def show():
+            if self.managing:
+                self.set_management(False)
             self._set_page('好友')
             self.set_filters(('', None, '', False, 0))
             self.select_uid(uid)
@@ -676,9 +747,18 @@ class Window(QMainWindow, Pages, DataActions):
     def _resize_workspace(self):
         compact = self.width() < 1120
         self.sidebar.setFixedWidth(154 if self.width() < 1000 else 184)
-        self.back_button.setVisible(compact)
-        self.list_area.setVisible(not compact or not self.compact_detail)
-        self.detail_panel.setVisible((not compact and bool(self._visible_records or self.editor)) or self.compact_detail)
+        self.back_button.setText('← 返回好友列表' if compact else '关闭详情 ×')
+        opened = not self.managing and bool(self.editor or (self._selected_id and self.compact_detail))
+        self.splitter.set_open(opened, compact)
+
+    def set_reduce_motion(self, reduced):
+        self.setProperty('reduceMotion', reduced)
+        self.settings.setValue('reduce_motion', reduced)
+        self.splitter.finish_motion()
+        self.table.cancel_drag()
+        for effect in self.findChildren(Ripple) + self.findChildren(TransitionCover):
+            effect.hide()
+            effect.deleteLater()
 
     def closeEvent(self, event):
         if self._busy:
@@ -692,4 +772,7 @@ class Window(QMainWindow, Pages, DataActions):
         for task in tuple(self._tasks):
             task.wait(1000)
         self.settings.sync()
+        QApplication.instance().removeEventFilter(self.click_feedback)
+        self.table.cancel_drag()
+        self.splitter.finish_motion()
         event.accept()

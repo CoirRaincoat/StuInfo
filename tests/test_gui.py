@@ -4,12 +4,14 @@ import time
 from datetime import date
 from pathlib import Path
 import pytest
-from PySide6.QtCore import QTimer, Qt, QSize
+from PySide6.QtCore import QTimer, Qt, QSize, QPoint, QEvent
 from PySide6.QtWidgets import QApplication, QMessageBox, QDialog, QComboBox, QInputDialog, QFileDialog
 from PySide6.QtTest import QTest
 from friendbook.core import Store, new_record
 from friendbook.gui import Window
 from friendbook.ui_widgets import Editor
+from friendbook.ui_motion import Ripple, TransitionCover
+from friendbook.ui_contacts import ContactEditor
 
 
 @pytest.fixture(scope='session')
@@ -34,6 +36,8 @@ def window(app, tmp_path):
         wait_task(widget)
     widget.discard_editor()
     widget.close()
+    widget.deleteLater()
+    app.sendPostedEvents(None, QEvent.Type.DeferredDelete)
     app.processEvents()
     store.close()
 
@@ -196,9 +200,241 @@ def test_home_metrics_share_one_row_and_friend_avatars_stay_in_name_column(windo
     window.navigate('好友')
     assert window.table.columnCount() == 4
     assert window.table.horizontalHeaderItem(0).text() == '好友'
-    assert window.table.iconSize() == QSize(36, 36)
+    assert window.table.iconSize() == QSize(32, 32)
     assert all(not window.table.item(row, 0).icon().isNull()
                for row in range(window.table.rowCount()))
+
+
+def test_full_width_list_and_interruptible_detail_drawer(window):
+    assert not window.detail_panel.isVisible()
+    assert window.list_area.width() == window.splitter.width()
+    assert window.table.rowHeight(0) == 46
+    window.table.selectRow(0)
+    assert window.detail_panel.isVisible()
+    QTest.qWait(360)
+    assert window.list_area.width() < window.splitter.width()
+    assert window.splitter.fraction == 1
+    window.back_button.click()
+    QTest.qWait(340)
+    assert not window.detail_panel.isVisible()
+    assert window.list_area.width() == window.splitter.width()
+    window.select_uid(window.store.records()[1]['id'])
+    window.resize(900, 650)
+    QTest.qWait(340)
+    assert not window.list_area.isVisible() and window.detail_panel.isVisible()
+    window.resize(1280, 800)
+    assert window.list_area.isVisible() and window.detail_panel.isVisible()
+
+
+def test_management_select_all_filter_reset_batch_save_and_exit(window, monkeypatch):
+    ids = [r['id'] for r in window.store.records()]
+    window.management_button.click()
+    QTest.qWait(340)
+    assert window.managing and not window.detail_panel.isVisible()
+    assert window.table.columnCount() == 5
+    QTest.mouseClick(window.table.viewport(), Qt.MouseButton.LeftButton,
+                     pos=window.table.visualItemRect(window.table.item(0, 0)).center())
+    assert window.selected_batch_ids() == [ids[0]]
+    assert window.selected() is None
+    window.select_all.click()
+    assert set(window.selected_batch_ids()) == set(ids)
+    window.apply_batch('favorite', True)
+    wait_task(window)
+    assert all(r['favorite'] for r in window.store.records())
+    window.set_filters(('Z', None, '', False, 0))
+    assert not window.selected_batch_ids()
+    assert not window.table.reorder_allowed
+    window.select_all.click()
+    assert window.selected_batch_ids() == [ids[0]]
+    monkeypatch.setattr(window, 'confirm', lambda *a: True)
+    window.apply_batch('delete')
+    wait_task(window)
+    assert window.store.counts() == (1, 1)
+    assert window.store.record(ids[1])['name'] == 'A（虚构）'
+    window.navigate('概览')
+    assert not window.managing
+    window.navigate('好友')
+    assert window.table.columnCount() == 4 and not window.detail_panel.isVisible()
+
+
+def test_handle_drag_commits_only_after_release_and_cancel_is_safe(window):
+    window.set_reduce_motion(True)
+    ids = [r['id'] for r in window.store.records()]
+    window.management_button.click()
+    QApplication.processEvents()
+    table = window.table
+    start = table.visualItemRect(table.item(0, 4)).center()
+    end = table.visualItemRect(table.item(1, 4)).bottomLeft() + QPoint(15, -2)
+    QTest.mousePress(table.viewport(), Qt.MouseButton.LeftButton, pos=start)
+    QTest.qWait(220)
+    assert table._drag_ids == [ids[0]]
+    QTest.mouseMove(table.viewport(), end)
+    assert [r['id'] for r in window.store.records()] == ids
+    QTest.mouseRelease(table.viewport(), Qt.MouseButton.LeftButton, pos=end)
+    wait_task(window)
+    assert [r['id'] for r in window.store.records()] == ids[::-1]
+    QApplication.processEvents()
+    start = table.visualItemRect(table.item(0, 4)).center()
+    QTest.mousePress(table.viewport(), Qt.MouseButton.LeftButton, pos=start)
+    QTest.qWait(220)
+    QTest.keyClick(table, Qt.Key.Key_Escape)
+    QTest.mouseRelease(table.viewport(), Qt.MouseButton.LeftButton, pos=end)
+    assert not window._busy
+    assert [r['id'] for r in window.store.records()] == ids[::-1]
+
+
+def test_management_save_failure_keeps_order_and_selection(window, monkeypatch):
+    ids = [r['id'] for r in window.store.records()]
+    window.management_button.click()
+    window.toggle_friend_check(ids[0])
+    def fail(*a, **k):
+        raise OSError('injected')
+    monkeypatch.setattr(Store, 'move_many', fail)
+    window.reorder_friends([ids[0]], None)
+    wait_task(window)
+    assert window.selected_batch_ids() == [ids[0]]
+    assert [r['id'] for r in window.store.records()] == ids
+    assert window.workspace.isEnabled()
+
+
+def test_grouped_contacts_profile_fields_and_roundtrip(window):
+    window.table.selectRow(0)
+    window.edit()
+    editor = window.editor
+    editor.contacts.add_entry('电话', 'demo-one')
+    editor.contacts.add_entry('电话', 'demo-two')
+    editor.contacts.add_entry('QQ', 'demo-qq')
+    editor.contacts.add_entry('微信', 'demo-wechat')
+    editor.contacts.add_entry('邮箱', 'friend@example.invalid')
+    editor.profile_fields['籍贯'].setText('浙江 · 虚构地点')
+    assert [r['caption'].text() for r in editor.contacts.rows['电话']] == ['电话1', '电话2']
+    uid = editor.original['id']
+    window.save_editor()
+    wait_task(window)
+    saved = window.store.record(uid)
+    assert saved['contacts'] == {'电话1': 'demo-one', '电话2': 'demo-two', 'QQ': 'demo-qq',
+                                  '微信': 'demo-wechat', '邮箱': 'friend@example.invalid'}
+    assert saved['custom']['籍贯'] == '浙江 · 虚构地点'
+    assert saved['custom']['测试属性'] == '保留'
+    window.edit()
+    assert not window.editor.dirty()
+    contacts = window.editor.contacts
+    contacts.remove_entry('电话', contacts.rows['电话'][0])
+    assert contacts.rows['电话'][0]['caption'].text() == '电话'
+    window.save_editor()
+    wait_task(window)
+    window.store.reload()
+    assert window.store.record(uid)['contacts']['电话2'] == 'demo-two'
+
+
+def test_legacy_contacts_not_renamed_or_overwritten(app):
+    old = {'电话': '1', '电话1': '2', '手机': '3', '工作电话': '4', 'QQ9': '', '任意平台': '  text  '}
+    editor = ContactEditor(old)
+    assert editor.values() == old
+    editor.add_entry('电话', 'new')
+    result = editor.values()
+    assert all(result[key] == value for key, value in old.items())
+    assert result['电话2'] == 'new'
+    editor.deleteLater()
+
+
+def test_contact_captions_do_not_overlap_inputs(window):
+    window.table.selectRow(0)
+    window.edit()
+    window.editor.contacts.add_entry('电话', 'demo-001')
+    window.editor.contacts.add_entry('电话', 'demo-002')
+    window.editor.tabs.setCurrentIndex(1)
+    QTest.qWait(360)
+    for entry in window.editor.contacts.rows['电话']:
+        assert entry['caption'].geometry().right() < entry['field'].geometry().left()
+    window.discard_editor()
+
+
+def test_row_hover_ripple_and_reduced_motion(window):
+    window.set_reduce_motion(False)
+    table = window.table
+    point = table.visualItemRect(table.item(0, 2)).center()
+    QTest.mouseMove(table.viewport(), point)
+    assert table.hovered_row == 0
+    QApplication.processEvents()
+    pixels = table.viewport().grab().toImage()
+    for column in range(4):
+        x = table.columnViewportPosition(column) + table.columnWidth(column) - 12
+        assert pixels.pixelColor(x, table.rowViewportPosition(0) + 4) != pixels.pixelColor(
+            x, table.rowViewportPosition(1) + 4)
+    QTest.mouseClick(table.viewport(), Qt.MouseButton.LeftButton, pos=point)
+    assert table.viewport().findChildren(Ripple)
+    window.set_reduce_motion(True)
+    QApplication.processEvents()
+    assert all(not effect.isVisible() for effect in window.findChildren(Ripple))
+    window.navigate('设置')
+    assert all(not effect.isVisible() for effect in window.findChildren(TransitionCover))
+    window.navigate('好友')
+    window.select_uid(window.store.records()[0]['id'])
+    assert window.splitter.fraction == 1
+    window.back_to_list()
+    assert not window.detail_panel.isVisible()
+
+
+def test_drag_multiple_and_autoscroll(window):
+    window.set_reduce_motion(True)
+    for index in range(25):
+        window.store.save(dict(new_record(), name=f'批量演示 {index}'))
+    window.refresh_all()
+    window.management_button.click()
+    QApplication.processEvents()
+    ids = [r['id'] for r in window.store.records()]
+    window.toggle_friend_check(ids[0])
+    window.toggle_friend_check(ids[2])
+    table = window.table
+    table.setVerticalScrollMode(table.ScrollMode.ScrollPerPixel)
+    start = table.visualItemRect(table.item(0, 4)).center()
+    QTest.mousePress(table.viewport(), Qt.MouseButton.LeftButton, pos=start)
+    QTest.qWait(200)
+    assert table._drag_ids == [ids[0], ids[2]]
+    end = QPoint(start.x(), table.viewport().height() - 4)
+    QTest.mouseMove(table.viewport(), end)
+    QTest.qWait(140)
+    assert table.verticalScrollBar().value() > 0
+    anchor = next((uid for uid in ids[table._drag_slot:] if uid not in table._drag_ids), None)
+    QTest.mouseRelease(table.viewport(), Qt.MouseButton.LeftButton, pos=end)
+    wait_task(window)
+    remaining = [uid for uid in ids if uid not in (ids[0], ids[2])]
+    at = remaining.index(anchor) if anchor else len(remaining)
+    assert [r['id'] for r in window.store.records()] == remaining[:at] + [ids[0], ids[2]] + remaining[at:]
+    assert set(window.selected_batch_ids()) == {ids[0], ids[2]}
+
+
+def test_dirty_cancel_blocks_entering_management(window, monkeypatch):
+    window.table.selectRow(0)
+    window.edit()
+    window.editor.profile_fields['籍贯'].setText('还未保存')
+    monkeypatch.setattr(window, 'unsaved_choice', lambda: QMessageBox.StandardButton.Cancel)
+    window.management_button.click()
+    assert not window.managing and window.editor.profile_fields['籍贯'].text() == '还未保存'
+
+
+def test_motion_setting_survives_restart_and_rapid_pages(window):
+    for page in ('概览', '分组', '好友', '回收站', '设置') * 2:
+        window.navigate(page)
+    QTest.qWait(250)
+    assert window.page_name == '设置'
+    window.reduce_motion.setChecked(True)
+    window.settings.sync()
+    other = Window(window.store)
+    try:
+        assert other.property('reduceMotion') is True
+        other.resize(820, 580)
+        other.show()
+        other.navigate('概览')
+        QApplication.processEvents()
+        grid = other.home_layout.itemAt(0).layout()
+        cards = [grid.itemAt(i).widget().geometry() for i in range(4)]
+        assert len({rect.y() for rect in cards}) == 1
+        assert cards[-1].right() < other.page_widgets['概览'].viewport().width()
+    finally:
+        other.close()
+        other.deleteLater()
 
 
 def test_compact_layout_and_long_content(window):

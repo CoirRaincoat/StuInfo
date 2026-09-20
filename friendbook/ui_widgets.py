@@ -3,11 +3,13 @@ import base64
 import copy
 from pathlib import Path
 from PySide6.QtCore import Qt, Signal, QRectF
-from PySide6.QtGui import QPixmap, QPainter, QPainterPath, QColor, QIcon, QPalette, QPen
+from PySide6.QtGui import QPixmap, QPainter, QPainterPath, QColor, QIcon, QPalette, QPen, QGuiApplication
 from PySide6.QtWidgets import (QWidget, QLabel, QVBoxLayout, QHBoxLayout, QFrame,
-    QPushButton, QLineEdit, QPlainTextEdit, QTabWidget, QCheckBox, QFileDialog,
+    QPushButton, QLineEdit, QPlainTextEdit, QCheckBox, QFileDialog,
     QTableWidget, QTableWidgetItem, QHeaderView, QScrollArea, QAbstractItemView, QSizePolicy)
 from .core import validate_record, photo_bytes
+from .contact_fields import PROFILE_FIELDS
+from .ui_motion import AnimatedTabs
 
 
 def label(text, role='', wrap=False):
@@ -100,11 +102,11 @@ def _paint_avatar(painter, rect, pixmap, circular=False):
     painter.save()
     painter.setClipPath(shape)
     if not pixmap.isNull():
-        scaled = pixmap.scaled(rect.size().toSize(), Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-                               Qt.TransformationMode.SmoothTransformation)
-        x = rect.x() + (rect.width() - scaled.width()) / 2
-        y = rect.y() + (rect.height() - scaled.height()) / 2
-        painter.drawPixmap(int(x), int(y), scaled)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        scale = max(rect.width() / pixmap.width(), rect.height() / pixmap.height())
+        width, height = rect.width() / scale, rect.height() / scale
+        source = QRectF((pixmap.width() - width) / 2, (pixmap.height() - height) / 2, width, height)
+        painter.drawPixmap(rect, pixmap, source)
     else:
         # A neutral person silhouette is the default avatar; no missing data is invented.
         painter.setPen(Qt.PenStyle.NoPen)
@@ -123,7 +125,9 @@ def _paint_avatar(painter, rect, pixmap, circular=False):
 
 
 def avatar_icon(record, size=36):
-    canvas = QPixmap(size, size)
+    ratio = max(1.0, QGuiApplication.instance().devicePixelRatio())
+    canvas = QPixmap(round(size * ratio), round(size * ratio))
+    canvas.setDevicePixelRatio(ratio)
     canvas.fill(Qt.GlobalColor.transparent)
     painter = QPainter(canvas)
     margin = max(1.0, size * .04)
@@ -200,6 +204,7 @@ class Editor(QWidget):
 
     def __init__(self, record, title='编辑好友', parent=None):
         super().__init__(parent)
+        from .ui_contacts import ContactEditor
         self.original = copy.deepcopy(record)
         self.photo = record['photo']
         layout = QVBoxLayout(self)
@@ -207,7 +212,7 @@ class Editor(QWidget):
         layout.setSpacing(12)
         layout.addWidget(label(title, 'panelTitle'))
         layout.addWidget(label('保存后生效 · 未知信息可留空', 'muted'))
-        self.tabs = QTabWidget()
+        self.tabs = AnimatedTabs()
         layout.addWidget(self.tabs, 1)
         scroll, basic = scroll_content()
         scroll.widget().setObjectName('panelContent')
@@ -238,11 +243,30 @@ class Editor(QWidget):
         self.favorite = QCheckBox('加入收藏')
         self.favorite.setChecked(record['favorite'])
         basic.addWidget(self.favorite)
+        self.profile_fields = {}
+        extra = QWidget()
+        extra_layout = QVBoxLayout(extra)
+        extra_layout.setContentsMargins(0, 4, 0, 0)
+        for name in PROFILE_FIELDS:
+            extra_layout.addWidget(label(name, 'fieldLabel'))
+            field = QLineEdit(record['custom'].get(name, ''))
+            field.setPlaceholderText('未知可留空')
+            self.profile_fields[name] = field
+            extra_layout.addWidget(field)
+        expand = button('更多资料 · 籍贯等', lambda: None)
+        expand.setToolTip('籍贯、现居地、学校 / 单位、职业')
+        expand.setCheckable(True)
+        expand.setChecked(any(name in record['custom'] for name in PROFILE_FIELDS))
+        extra.setVisible(expand.isChecked())
+        expand.toggled.connect(extra.setVisible)
+        basic.addWidget(expand)
+        basic.addWidget(extra)
         basic.addStretch()
         self.tabs.addTab(scroll, '资料')
-        self.contacts = Pairs(record['contacts'], '双击单元格编辑。可添加多个电话、邮箱或其他联系方式。')
+        self.contacts = ContactEditor(record['contacts'])
         self.tabs.addTab(self.contacts, '联系方式')
-        self.custom = Pairs(record['custom'], '自由添加属性，例如相识地点、喜欢的颜色。')
+        self.custom = Pairs({k: v for k, v in record['custom'].items() if k not in PROFILE_FIELDS},
+                            '自由添加属性，例如相识地点、喜欢的颜色。籍贯等常用资料在“资料”页编辑。')
         self.tabs.addTab(self.custom, '自定义')
         self.notes = QPlainTextEdit(record['notes'])
         self.notes.setPlaceholderText('记录近况、相识故事，或下次见面想聊的事情……')
@@ -284,7 +308,14 @@ class Editor(QWidget):
         for key, field in self.fields.items():
             record[key] = field.text().strip()
         record['tags'] = [t.strip() for t in record['tags'].replace('，', ',').split(',') if t.strip()]
-        record.update(contacts=self.contacts.values(), custom=self.custom.values(),
+        custom = self.custom.values()
+        for name, field in self.profile_fields.items():
+            if name in custom:
+                raise ValueError(f'“{name}”请在资料页填写，不能重复添加为自定义属性')
+            value = field.text()
+            if value or name in self.original['custom']:
+                custom[name] = value
+        record.update(contacts=self.contacts.values(), custom=custom,
                       notes=self.notes.toPlainText(), favorite=self.favorite.isChecked(), photo=self.photo)
         return record
 
@@ -389,6 +420,11 @@ def apply_theme(app, dark):
         QTableWidget {{ background: {panel}; border: none; border-radius: 6px; selection-background-color: {selected}; selection-color: {fg}; }}
         QTableWidget::item {{ padding: 8px; border-bottom: 1px solid {border}; }}
         QTableWidget::item:hover {{ background: {selected}; }}
+        QTableWidget#friendsTable::item {{ padding: 5px 8px; }}
+        QTableWidget#friendsTable::indicator {{ width: 14px; height: 14px; border: 1px solid {muted}; border-radius: 7px; background: {panel}; }}
+        QTableWidget#friendsTable::indicator:checked {{ background: #9281b8; border: 3px solid {panel}; }}
+        QCheckBox::indicator:indeterminate {{ background: #b2a2cf; border-color: #9281b8; }}
+        QWidget#managementBar {{ background: {selected}; border-radius: 8px; }}
         QHeaderView::section {{ background: {panel}; color: {muted}; border: none; border-bottom: 1px solid {border}; padding: 12px 8px; font-weight: 400; }}
         QListWidget#navigation {{ border: none; background: transparent; outline: none; }}
         QListWidget#navigation::item {{ padding: 11px 12px; margin: 2px 0; border-radius: 6px; }}
