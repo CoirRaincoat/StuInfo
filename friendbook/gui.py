@@ -2,7 +2,7 @@
 from PySide6.QtCore import Qt, QSettings, QTimer, QSize
 from PySide6.QtGui import QAction, QKeySequence, QFont
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QFrame, QVBoxLayout,
-    QHBoxLayout, QListWidget, QLineEdit, QComboBox, QCheckBox,
+    QHBoxLayout, QListWidget, QLineEdit, QComboBox, QCheckBox, QStackedWidget,
     QTableWidgetItem, QMessageBox, QMenu, QToolButton, QProgressBar, QHeaderView)
 from .core import new_record
 from .ui_widgets import (label, button, scroll_content, clear_layout, Avatar, Editor, avatar_icon,
@@ -12,7 +12,7 @@ from .ui_pages import Pages
 from .ui_actions import DataActions
 from .ui_management import ListManagement
 from .ui_friend_list import FriendsTable
-from .ui_motion import AnimatedStack, DrawerWorkspace, ClickFeedback, Ripple, TransitionCover, motion_enabled
+from .ui_motion import DrawerWorkspace, ClickFeedback, Ripple
 from .contact_fields import PROFILE_FIELDS, grouped_contacts, contact_caption
 
 
@@ -95,7 +95,7 @@ class Window(QMainWindow, Pages, DataActions, ListManagement):
         self.progress.setTextVisible(False)
         self.progress.hide()
         center.addWidget(self.progress)
-        self.pages = AnimatedStack()
+        self.pages = QStackedWidget()
         center.addWidget(self.pages, 1)
         root.addLayout(center, 1)
         friends = self.build_friends()
@@ -192,7 +192,7 @@ class Window(QMainWindow, Pages, DataActions, ListManagement):
         panel_layout.setContentsMargins(0, 0, 0, 0)
         self.back_button = button('← 返回好友列表', self.back_to_list)
         panel_layout.addWidget(self.back_button)
-        self.panel_stack = AnimatedStack()
+        self.panel_stack = QStackedWidget()
         panel_layout.addWidget(self.panel_stack, 1)
         self.detail, self.detail_layout = scroll_content()
         self.detail.widget().setObjectName('panelContent')
@@ -240,8 +240,6 @@ class Window(QMainWindow, Pages, DataActions, ListManagement):
 
     def _set_page(self, name):
         old = self.page_name
-        shared_page = self.pages.currentWidget() == self.page_widgets[name]
-        snapshot = self.pages.currentWidget().grab() if old != name and shared_page and motion_enabled(self) else None
         if self.managing and name != '好友':
             self.set_management(False)
         self.page_name = name
@@ -261,8 +259,6 @@ class Window(QMainWindow, Pages, DataActions, ListManagement):
             self.refresh_friends()
         self.refresh_current_page()
         self._resize_workspace()
-        if snapshot is not None:
-            TransitionCover(self.pages, snapshot)
 
     def request_leave(self, action):
         if self._busy:
@@ -756,7 +752,7 @@ class Window(QMainWindow, Pages, DataActions, ListManagement):
         self.settings.setValue('reduce_motion', reduced)
         self.splitter.finish_motion()
         self.table.cancel_drag()
-        for effect in self.findChildren(Ripple) + self.findChildren(TransitionCover):
+        for effect in self.findChildren(Ripple):
             effect.hide()
             effect.deleteLater()
 

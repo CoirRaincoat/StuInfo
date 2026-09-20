@@ -1,5 +1,11 @@
 # 交付验证记录
 
+## 2026-09-20 即时切页与整行反馈调整
+
+取消导航页、统计 / 编辑标签页及编辑面板的切换过渡，删除对应的快照与动画实现。好友列表只绘制整行选中反馈，不再为当前单元格绘制焦点边框；表格仍保留键盘焦点。点击波纹、详情抽屉与拖动缓动继续由“减少动态效果”控制。
+
+Linux / Qt offscreen 下 **74 项测试全部通过**，`git diff --check` 通过。运行 `scripts/visual_interactions.py`，检查深浅主题的选中行，以及导航、编辑、管理模式、拖动取消和窄窗口布局；更新 `docs/screenshots/interactions/drawer-light.png` 展示无单元格边框的效果。验证使用独立临时目录中的虚构资料；本轮未重新构建或运行 Windows exe。
+
 ## 2026-09-20 列表管理、资料扩展与动效
 
 本轮环境为 Linux、Python 3.12.14、PySide6-Essentials 6.11.2、pytest 9.1.1、Pillow 12.3.0。运行 `python -m pytest -q`，**74 项全部通过**。GUI 自动化使用 Qt offscreen，不代表 Windows 原生窗口或 exe 的实机验收。

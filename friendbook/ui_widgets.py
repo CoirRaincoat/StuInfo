@@ -5,11 +5,10 @@ from pathlib import Path
 from PySide6.QtCore import Qt, Signal, QRectF
 from PySide6.QtGui import QPixmap, QPainter, QPainterPath, QColor, QIcon, QPalette, QPen, QGuiApplication
 from PySide6.QtWidgets import (QWidget, QLabel, QVBoxLayout, QHBoxLayout, QFrame,
-    QPushButton, QLineEdit, QPlainTextEdit, QCheckBox, QFileDialog,
+    QPushButton, QLineEdit, QPlainTextEdit, QCheckBox, QFileDialog, QTabWidget,
     QTableWidget, QTableWidgetItem, QHeaderView, QScrollArea, QAbstractItemView, QSizePolicy)
 from .core import validate_record, photo_bytes
 from .contact_fields import PROFILE_FIELDS
-from .ui_motion import AnimatedTabs
 
 
 def label(text, role='', wrap=False):
@@ -212,7 +211,7 @@ class Editor(QWidget):
         layout.setSpacing(12)
         layout.addWidget(label(title, 'panelTitle'))
         layout.addWidget(label('保存后生效 · 未知信息可留空', 'muted'))
-        self.tabs = AnimatedTabs()
+        self.tabs = QTabWidget()
         layout.addWidget(self.tabs, 1)
         scroll, basic = scroll_content()
         scroll.widget().setObjectName('panelContent')
