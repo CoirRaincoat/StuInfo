@@ -2,8 +2,8 @@
 import base64
 import copy
 from pathlib import Path
-from PySide6.QtCore import Qt, Signal, QSize
-from PySide6.QtGui import QPixmap, QPainter, QPainterPath, QColor, QFont, QIcon, QPalette
+from PySide6.QtCore import Qt, Signal, QRectF
+from PySide6.QtGui import QPixmap, QPainter, QPainterPath, QColor, QIcon, QPalette, QPen
 from PySide6.QtWidgets import (QWidget, QLabel, QVBoxLayout, QHBoxLayout, QFrame,
     QPushButton, QLineEdit, QPlainTextEdit, QTabWidget, QCheckBox, QFileDialog,
     QTableWidget, QTableWidgetItem, QHeaderView, QScrollArea, QAbstractItemView, QSizePolicy)
@@ -77,33 +77,75 @@ def configure_table(table):
     table.setAlternatingRowColors(False)
 
 
+def _photo_pixmap(record):
+    pixmap = QPixmap()
+    encoded = (record or {}).get('photo')
+    if encoded:
+        try:
+            pixmap.loadFromData(base64.b64decode(encoded))
+        except (ValueError, TypeError):
+            pass
+    return pixmap
+
+
+def _paint_avatar(painter, rect, pixmap, circular=False):
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    shape = QPainterPath()
+    if circular:
+        shape.addEllipse(rect)
+    else:
+        radius = min(16.0, rect.width() * .22)
+        shape.addRoundedRect(rect, radius, radius)
+    painter.fillPath(shape, QColor('#ddd8ec'))
+    painter.save()
+    painter.setClipPath(shape)
+    if not pixmap.isNull():
+        scaled = pixmap.scaled(rect.size().toSize(), Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                               Qt.TransformationMode.SmoothTransformation)
+        x = rect.x() + (rect.width() - scaled.width()) / 2
+        y = rect.y() + (rect.height() - scaled.height()) / 2
+        painter.drawPixmap(int(x), int(y), scaled)
+    else:
+        # A neutral person silhouette is the default avatar; no missing data is invented.
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor('#8f80ad'))
+        size = min(rect.width(), rect.height())
+        head = QRectF(rect.center().x() - size * .16, rect.y() + size * .18,
+                      size * .32, size * .32)
+        shoulders = QRectF(rect.center().x() - size * .32, rect.y() + size * .56,
+                           size * .64, size * .48)
+        painter.drawEllipse(head)
+        painter.drawRoundedRect(shoulders, size * .18, size * .18)
+    painter.restore()
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    painter.setPen(QPen(QColor('#b7aec9'), max(1.0, min(rect.width(), rect.height()) * .035)))
+    painter.drawPath(shape)
+
+
+def avatar_icon(record, size=36):
+    canvas = QPixmap(size, size)
+    canvas.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(canvas)
+    margin = max(1.0, size * .04)
+    _paint_avatar(painter, QRectF(margin, margin, size - 2 * margin, size - 2 * margin),
+                  _photo_pixmap(record), circular=True)
+    painter.end()
+    return QIcon(canvas)
+
+
 class Avatar(QWidget):
-    def __init__(self, record=None, size=72):
+    def __init__(self, record=None, size=72, circular=False):
         super().__init__()
         self.setFixedSize(size, size)
         self.record = record or {}
-        self.pixmap = QPixmap()
-        if self.record.get('photo'):
-            self.pixmap.loadFromData(base64.b64decode(self.record['photo']))
+        self.circular = circular
+        self.pixmap = _photo_pixmap(self.record)
 
     def paintEvent(self, event):
         painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        path = QPainterPath()
-        path.addRoundedRect(0, 0, self.width(), self.height(), 16, 16)
-        painter.setClipPath(path)
-        painter.fillRect(self.rect(), QColor('#ddd8ec'))
-        if not self.pixmap.isNull():
-            pix = self.pixmap.scaled(self.size(), Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-                                     Qt.TransformationMode.SmoothTransformation)
-            painter.drawPixmap((self.width() - pix.width()) // 2, (self.height() - pix.height()) // 2, pix)
-        else:
-            painter.setPen(QColor('#655883'))
-            font = painter.font()
-            font.setPixelSize(self.width() // 3)
-            font.setWeight(QFont.Weight.DemiBold)
-            painter.setFont(font)
-            painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, self.record.get('name', '')[:1] or '友')
+        margin = max(1.0, self.width() * .025)
+        _paint_avatar(painter, QRectF(margin, margin, self.width() - 2 * margin,
+                                      self.height() - 2 * margin), self.pixmap, self.circular)
 
 
 class Pairs(QWidget):

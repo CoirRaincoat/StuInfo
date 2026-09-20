@@ -25,7 +25,8 @@ class Pages:
             content.addWidget(label(title, 'muted'))
             content.addWidget(label(str(value), 'metric'))
             content.addWidget(label(note, 'muted', True))
-            metrics.addWidget(frame, i // 2, i % 2)
+            metrics.addWidget(frame, 0, i)
+            metrics.setColumnStretch(i, 1)
         self.home_layout.addLayout(metrics)
         frame, content = card(f'{date.today().month} 月生日', '已知到月份即可纳入；没有出生日期，不推断具体哪天生日。')
         for record in data['birthdays'][:6]:
