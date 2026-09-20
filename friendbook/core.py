@@ -12,13 +12,14 @@ from datetime import datetime
 from collections import Counter
 from PIL import Image, ImageOps
 from .linked import LinkedBook
+from .labels import normalize_labels, record_labels, with_labels
 
 MAX_FILE = 100 * 1024 * 1024
 
 
 def new_record():
     return dict(id=str(uuid.uuid4()), version=1, name='', birth='', interests='',
-                contacts={}, tags=[], group='', favorite=False, notes='', custom={}, photo='')
+                contacts={}, tags=[], group='', labels=[], favorite=False, notes='', custom={}, photo='')
 
 
 def photo_bytes(raw):
@@ -38,9 +39,11 @@ def photo_bytes(raw):
 
 
 def validate_record(record):
-    if not isinstance(record, dict) or set(record) != set(new_record()):
+    fields = set(new_record())
+    if not isinstance(record, dict) or set(record) not in (fields, fields - {'labels'}):
         raise ValueError('档案字段不完整或格式版本不兼容')
     r = copy.deepcopy(record)
+    r['labels'] = normalize_labels(r.get('labels', []))
     try:
         uuid.UUID(r['id'])
     except (ValueError, TypeError, AttributeError) as exc:
@@ -52,6 +55,8 @@ def validate_record(record):
             raise ValueError('文本内容格式错误或过长')
         if key != 'photo':
             r[key] = r[key].strip()
+    if r['labels']:
+        r['group'] = r['labels'][0]
     if r['birth']:
         if not re.fullmatch(r'\d{4}(-\d{2})?', r['birth']):
             raise ValueError('出生年月请填 YYYY 或 YYYY-MM，未知请留空')
@@ -124,6 +129,7 @@ class Store:
         for key in ('active', 'trash'):
             if not isinstance(payload.get(key), list) or len(payload[key]) > 50000:
                 raise ValueError('档案集合格式错误或过大')
+        normalize_labels(payload.get('label_catalog', []), limit=50000)
         for raw in payload['active']:
             book.insert(validate_record(raw))
         for raw in payload['trash']:
@@ -136,20 +142,32 @@ class Store:
 
     def reload(self):
         rev, raw = self.db.execute('SELECT revision,payload FROM state WHERE id=1').fetchone()
-        book, trash = self.decode(json.loads(raw))
-        self.book, self.trash, self.revision = book, trash, rev
+        payload = json.loads(raw)
+        book, trash = self.decode(payload)
+        self.adopt(book, trash, rev, self._catalog_from_payload(payload))
+
+    @staticmethod
+    def _catalog_from_payload(payload):
+        catalog = normalize_labels(payload.get('label_catalog', []), limit=50000)
+        values = list(dict.fromkeys(catalog + [label for record in payload['active'] + payload['trash']
+                                               for label in record_labels(record)]))
+        return normalize_labels(values, limit=50000)
 
     def payload(self):
-        return dict(schema=1, active=list(self.book), trash=list(self.trash.values()))
+        return copy.deepcopy(dict(schema=1, active=list(self.book), trash=list(self.trash.values()),
+                                  label_catalog=self.label_catalog))
 
-    def change(self, operation):
+    def change(self, operation, *, label_catalog=None):
         book = LinkedBook()
         for record in self.book:
             book.insert(copy.deepcopy(record))
         trash = copy.deepcopy(self.trash)
         result = operation(book, trash)
         book.validate()
-        payload = json.dumps(dict(schema=1, active=list(book), trash=list(trash.values())), ensure_ascii=False)
+        catalog = normalize_labels(self.label_catalog if label_catalog is None else label_catalog, limit=50000)
+        catalog = normalize_labels(list(dict.fromkeys(catalog + [label for record in book
+                                                                 for label in record_labels(record)])), limit=50000)
+        payload = json.dumps(dict(schema=1, active=list(book), trash=list(trash.values()), label_catalog=catalog), ensure_ascii=False)
         if len(book) > 50000 or len(trash) > 50000 or len(payload.encode('utf-8')) > MAX_FILE:
             raise ValueError('档案超过容量限制（单集合 50000 份、完整数据 100 MB），本次变更未保存')
         try:
@@ -161,7 +179,7 @@ class Store:
         except Exception:
             self.db.rollback()
             raise
-        self.book, self.trash = book, trash
+        self.book, self.trash, self.label_catalog = book, trash, catalog
         self.revision += 1
         return result
 
@@ -217,7 +235,7 @@ class Store:
 
     def batch_update(self, uids, action, value=None):
         selected = self._active_ids(uids)
-        if action not in ('favorite', 'group', 'delete'):
+        if action not in ('favorite', 'group', 'labels', 'delete'):
             raise ValueError('不支持的批量操作')
         if action == 'favorite' and type(value) is not bool:
             raise ValueError('收藏状态无效')
@@ -225,6 +243,8 @@ class Store:
             if not isinstance(value, str) or len(value) > 20000:
                 raise ValueError('分组名称无效或过长')
             value = value.strip()
+        if action == 'labels':
+            value = normalize_labels(value)
         ordered = [r['id'] for r in self.book if r['id'] in selected]
         def op(book, trash):
             for uid in ordered:
@@ -232,21 +252,25 @@ class Store:
                     trash[uid] = book.remove(uid)
                 else:
                     record = book.get(uid)
-                    book.update(uid, dict(record, **{action: value, 'version': record['version'] + 1}))
+                    updated = (with_labels(record, [value] if value else []) if action == 'group' else
+                               with_labels(record, value) if action == 'labels' else dict(record, **{action: value}))
+                    book.update(uid, dict(updated, version=record['version'] + 1))
             return len(ordered)
         return self.change(op)
 
     def export_selected(self, path, uids):
         selected = self._active_ids(uids)
         self._safe_destination(path)
-        atomic_json(path, dict(schema=1, active=[r for r in self.book if r['id'] in selected], trash=[]))
+        records = [r for r in self.book if r['id'] in selected]
+        labels = list(dict.fromkeys(label for record in records for label in record_labels(record)))
+        atomic_json(path, dict(schema=1, active=records, trash=[], label_catalog=labels))
         return len(selected)
 
     def search(self, query='', group='', tag='', favorites=False):
         terms = query.casefold().split()
         for r in self.book:
-            text = ' '.join(str(r[k]) for k in ('name', 'birth', 'interests', 'contacts', 'tags', 'notes', 'custom', 'group')).casefold()
-            if all(term in text for term in terms) and (not group or group == r['group']) and (
+            text = ' '.join(str(r[k]) for k in ('name', 'birth', 'interests', 'contacts', 'tags', 'notes', 'custom', 'group', 'labels')).casefold()
+            if all(term in text for term in terms) and (not group or group in record_labels(r)) and (
                     not tag or tag.casefold() in (t.casefold() for t in r['tags'])) and (not favorites or r['favorite']):
                 yield r
 
@@ -281,7 +305,7 @@ class Store:
             raise ValueError('不能覆盖正在使用的数据库')
 
     @staticmethod
-    def read_archive(path):
+    def _read_archive_payload(path):
         if Path(path).stat().st_size > MAX_FILE:
             raise ValueError('文件超过 100 MB 限制')
         def unique_object(pairs):
@@ -293,10 +317,16 @@ class Store:
             return result
         with open(path, encoding='utf-8-sig') as stream:
             payload = json.load(stream, object_pairs_hook=unique_object)
-        return Store.decode(payload)
+        return payload
+
+    @staticmethod
+    def read_archive(path):
+        return Store.decode(Store._read_archive_payload(path))
 
     def import_file(self, path):
-        incoming, _ = self.read_archive(path)
+        payload = self._read_archive_payload(path)
+        incoming, _ = self.decode(payload)
+        catalog = self.label_names() + self._catalog_from_payload(payload)
         def op(book, trash):
             added = skipped = 0
             for r in incoming:
@@ -306,10 +336,12 @@ class Store:
                     book.insert(r)
                     added += 1
             return added, skipped
-        return self.change(op)
+        return self.change(op, label_catalog=catalog)
 
     def recover(self, path):
-        incoming, removed = self.read_archive(path)
+        payload = self._read_archive_payload(path)
+        incoming, removed = self.decode(payload)
+        catalog = self._catalog_from_payload(payload)
         safety = self.path.parent / ('恢复前备份-' + datetime.now().strftime('%Y%m%d-%H%M%S-%f') + '.json')
         self.export(safety, backup=True)
         def op(book, trash):
@@ -319,7 +351,7 @@ class Store:
                 book.insert(r)
             trash.clear()
             trash.update(removed)
-        self.change(op)
+        self.change(op, label_catalog=catalog)
         return safety
 
     def close(self):
@@ -333,7 +365,8 @@ class Store:
                 term in (r['name'] + ' ' + r['notes']).casefold() for term in terms))
         else:
             source = self.search(query, group or '', tag, favorites)
-        return [copy.deepcopy(r) for r in source if trash or group is None or r['group'] == group]
+        return [copy.deepcopy(r) for r in source if trash or group is None or
+                (not record_labels(r) if group == '' else group in record_labels(r))]
 
     def record(self, uid, trash=False):
         return copy.deepcopy(self.trash[uid] if trash else self.book.get(uid))
@@ -342,7 +375,22 @@ class Store:
         return len(self.book), len(self.trash)
 
     def group_counts(self):
-        return Counter(r['group'] for r in self.book)
+        counts = Counter({label: 0 for label in self.label_names()})
+        for record in self.book:
+            counts.update(record_labels(record) or [''])
+        return counts
+
+    def label_names(self):
+        return list(self.label_catalog)
+
+    def create_label(self, name):
+        labels = normalize_labels([name])
+        if not labels:
+            raise ValueError('标签名称不能为空')
+        name = labels[0]
+        if name not in self.label_catalog:
+            self.change(lambda book, trash: None, label_catalog=self.label_catalog + [name])
+        return name
 
     def duplicate_records(self, record):
         return [copy.deepcopy(r) for r in self.duplicates(record)]
@@ -356,17 +404,34 @@ class Store:
             self.move(uid, neighbor.data['id'], direction < 0)
 
     def rename_group(self, old, new):
+        if not isinstance(old, str) or not isinstance(new, str):
+            raise ValueError('标签名称应为文本')
         new = new.strip()
         if len(new) > 20000:
-            raise ValueError('分组名称过长')
+            raise ValueError('标签名称过长')
+        catalog = list(dict.fromkeys((new if label == old else label) for label in self.label_catalog
+                                     if label != old or new))
+        if new and new not in catalog:
+            catalog.append(new)
         def op(book, trash):
             count = 0
             for r in book:
-                if r['group'] == old:
-                    book.update(r['id'], dict(r, group=new, version=r['version'] + 1))
+                labels = record_labels(r)
+                if old in labels or (not old and not labels):
+                    changed = ([new] if new else []) if not old else [new if label == old else label for label in labels]
+                    book.update(r['id'], dict(with_labels(r, changed), version=r['version'] + 1))
                     count += 1
+            # A renamed/deleted label must not reappear when a friend is restored.
+            for uid, r in list(trash.items()):
+                labels = record_labels(r)
+                if old in labels:
+                    trash[uid] = dict(with_labels(r, [new if label == old else label for label in labels]),
+                                      version=r['version'] + 1)
             return count
-        return self.change(op)
+        return self.change(op, label_catalog=catalog)
+
+    def dissolve_group(self, name):
+        return self.rename_group(name, '')
 
     def connection_rows(self):
         rows = []
@@ -378,17 +443,21 @@ class Store:
             node = node.next
         return rows
 
-    def adopt(self, book, trash, revision):
+    def adopt(self, book, trash, revision, label_catalog=None):
         """Publish a validated worker snapshot after its connection has closed."""
         self.book, self.trash, self.revision = book, trash, revision
+        self.label_catalog = (list(label_catalog) if label_catalog is not None else
+                              list(dict.fromkeys(label for record in book for label in record_labels(record))))
 
     def preview_import(self, path):
-        incoming, _ = self.read_archive(path)
+        payload = self._read_archive_payload(path)
+        incoming, _ = self.decode(payload)
         records = list(incoming)
         skipped = sum(r['id'] in self.book.index or r['id'] in self.trash for r in records)
-        return dict(records=records, total=len(records), skipped=skipped)
+        return dict(records=records, total=len(records), skipped=skipped,
+                    label_catalog=self._catalog_from_payload(payload))
 
-    def import_prepared(self, records):
+    def import_prepared(self, records, label_catalog=None):
         # A preview is an external input buffer, never the runtime collection.
         incoming, _ = self.decode(dict(schema=1, active=records, trash=[]))
         def op(book, trash):
@@ -400,17 +469,37 @@ class Store:
                     book.insert(r)
                     added += 1
             return added, skipped
-        return self.change(op)
+        catalog = self.label_names() + normalize_labels(label_catalog or [], limit=50000)
+        return self.change(op, label_catalog=catalog)
+
+    def commit_management(self, payload, expected_revision):
+        """Publish a complete management draft as one revision, or keep it untouched."""
+        if type(expected_revision) is not int or self.revision != expected_revision:
+            raise ValueError('数据已被另一窗口修改，管理草稿仍保留，请先取消管理并刷新')
+        incoming, removed = self.decode(payload)
+        catalog = self._catalog_from_payload(payload)
+        def op(book, trash):
+            while book.head:
+                book.remove(book.head.data['id'])
+            for record in incoming:
+                book.insert(record)
+            trash.clear()
+            trash.update(removed)
+        return self.change(op, label_catalog=catalog)
+
+    def export_management_selected(self, path, uids, payload):
+        from .management import ManagementSession
+        draft = ManagementSession.from_payload(self, payload)
+        return draft.export_selected(path, uids)
 
     def overview(self, today=None):
         today = today or datetime.now().date()
-        groups, interests, months, ages = Counter(), Counter(), Counter(), Counter()
+        groups, interests, months, ages = self.group_counts(), Counter(), Counter(), Counter()
         birthdays = []
         favorites = birth_unknown = month_unknown = interests_unknown = 0
         age_bands = ((0, 17, '0–17 岁'), (18, 29, '18–29 岁'), (30, 44, '30–44 岁'),
                      (45, 59, '45–59 岁'), (60, 10000, '60 岁及以上'))
         for r in self.book:
-            groups[r['group']] += 1
             favorites += r['favorite']
             tokens = {t.strip() for t in re.split(r'[,，、;；\n]+', r['interests']) if t.strip()}
             interests.update(tokens)
@@ -427,7 +516,8 @@ class Store:
                 month = int(birth[5:])
                 months[month] += 1
                 if month == today.month:
-                    birthdays.append(dict(id=r['id'], name=r['name'], birth=birth, group=r['group']))
+                    birthdays.append(dict(id=r['id'], name=r['name'], birth=birth, group=r['group'],
+                                          labels=record_labels(r)))
                 elif month < today.month:
                     low = high = base
                 else:

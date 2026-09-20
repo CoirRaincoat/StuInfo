@@ -19,7 +19,7 @@ class StoreTask(QThread):
             if self.method != 'reload' and store.revision != self.revision:
                 raise ValueError('数据已被其他窗口修改。请先在设置中刷新，再重新打开档案。草稿已保留。')
             result = getattr(store, self.method)(*self.args, **self.kwargs)
-            snapshot = (result, store.book, store.trash, store.revision)
+            snapshot = (result, store.book, store.trash, store.revision, store.label_names())
             store.close()
             store = None
             self.completed.emit(snapshot)
