@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import sys
 import tempfile
+import time
 
 if os.name != 'nt':
     os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
@@ -65,8 +66,12 @@ def main():
             table = window.table
             start = table.visualItemRect(table.item(0, 4)).center()
             QTest.mousePress(table.viewport(), Qt.MouseButton.LeftButton, pos=start)
-            QTest.qWait(210)
-            assert table._drag_ids
+            expected = [records[0]['id'], records[2]['id']]
+            assert table._pressed_handle == records[0]['id'], 'Handle press was not accepted'
+            until = time.monotonic() + 2
+            while not table._drag_ids and table._pressed_handle is not None and time.monotonic() < until:
+                QTest.qWait(10)
+            assert table._drag_ids == expected, 'Long press did not start the expected multi-friend drag'
             end = table.visualItemRect(table.item(3, 4)).bottomLeft() + QPoint(15, -2)
             QTest.mouseMove(table.viewport(), end)
             capture('drag-' + suffix, 120)
