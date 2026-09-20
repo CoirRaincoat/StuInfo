@@ -4,7 +4,7 @@ import time
 from datetime import date
 from pathlib import Path
 import pytest
-from PySide6.QtCore import QTimer, Qt
+from PySide6.QtCore import QTimer, Qt, QSize
 from PySide6.QtWidgets import QApplication, QMessageBox, QDialog, QComboBox, QInputDialog, QFileDialog
 from PySide6.QtTest import QTest
 from friendbook.core import Store, new_record
@@ -185,6 +185,20 @@ def test_teaching_and_all_pages_and_themes(window):
             assert not window.grab().isNull()
     assert window.links_table.item(0, 0).text() == 'NULL ← HEAD'
     assert window.links_table.item(0, 3).text() == rows[0][3]
+
+
+def test_home_metrics_share_one_row_and_friend_avatars_stay_in_name_column(window):
+    window.navigate('概览')
+    metrics = window.home_layout.itemAt(0).layout()
+    assert metrics.count() == 4
+    assert [metrics.getItemPosition(i)[:2] for i in range(4)] == [(0, i) for i in range(4)]
+
+    window.navigate('好友')
+    assert window.table.columnCount() == 4
+    assert window.table.horizontalHeaderItem(0).text() == '好友'
+    assert window.table.iconSize() == QSize(36, 36)
+    assert all(not window.table.item(row, 0).icon().isNull()
+               for row in range(window.table.rowCount()))
 
 
 def test_compact_layout_and_long_content(window):
