@@ -13,6 +13,7 @@ from collections import Counter
 from PIL import Image, ImageOps
 from .linked import LinkedBook
 from .labels import normalize_labels, record_labels, with_labels
+from .analytics import age_category, interest_tokens, missing_fields, matches_category, QUALITY_CHECKS
 
 MAX_FILE = 100 * 1024 * 1024
 
@@ -83,6 +84,10 @@ def validate_record(record):
                 if im.width * im.height > 30_000_000:
                     raise ValueError()
                 im.verify()
+            # JPEG verify() checks the container/header, not the pixel stream.
+            # Reopen after verify() and decode without changing the stored bytes.
+            with Image.open(io.BytesIO(raw)) as im:
+                im.load()
         except Exception as exc:
             raise ValueError('档案中的照片已损坏') from exc
     return r
@@ -260,7 +265,7 @@ class Store:
 
     def export_selected(self, path, uids):
         selected = self._active_ids(uids)
-        self._safe_destination(path)
+        self.check_export_destination(path)
         records = [r for r in self.book if r['id'] in selected]
         labels = list(dict.fromkeys(label for record in records for label in record_labels(record)))
         atomic_json(path, dict(schema=1, active=records, trash=[], label_catalog=labels))
@@ -294,15 +299,33 @@ class Store:
         self.change(op)
 
     def export(self, path, backup=False):
-        self._safe_destination(path)
+        self.check_export_destination(path)
         data = self.payload()
         if not backup:
             data['trash'] = []
         atomic_json(path, data)
 
+    def check_export_destination(self, path):
+        """Keep every export format away from the active data directory's files.
+
+        SQLite sidecars may not exist between transactions; their names still
+        belong to SQLite. Protect both spellings when the database is a symlink.
+        """
+        destination = Path(path).resolve()
+        database_paths = {self.path, self.path.resolve()}
+        reserved = set()
+        for database in database_paths:
+            reserved.add(database.resolve())
+            reserved.update(Path(str(database) + suffix).resolve()
+                            for suffix in ('-journal', '-wal', '-shm'))
+            reserved.update((database.parent / name).resolve()
+                            for name in ('app.lock', 'settings.ini'))
+        if destination in reserved:
+            raise ValueError('不能覆盖正在使用的数据库、事务辅助文件、应用锁或设置文件，请另选导出位置')
+
     def _safe_destination(self, path):
-        if Path(path).resolve() == self.path.resolve():
-            raise ValueError('不能覆盖正在使用的数据库')
+        # Compatibility for existing callers; all formats share one policy.
+        self.check_export_destination(path)
 
     @staticmethod
     def _read_archive_payload(path):
@@ -497,36 +520,38 @@ class Store:
         groups, interests, months, ages = self.group_counts(), Counter(), Counter(), Counter()
         birthdays = []
         favorites = birth_unknown = month_unknown = interests_unknown = 0
-        age_bands = ((0, 17, '0–17 岁'), (18, 29, '18–29 岁'), (30, 44, '30–44 岁'),
-                     (45, 59, '45–59 岁'), (60, 10000, '60 岁及以上'))
         for r in self.book:
             favorites += r['favorite']
-            tokens = {t.strip() for t in re.split(r'[,，、;；\n]+', r['interests']) if t.strip()}
+            tokens = interest_tokens(r)
             interests.update(tokens)
             interests_unknown += not tokens
+            ages[age_category(r, today)] += 1
             birth = r['birth']
             if not birth:
                 birth_unknown += 1
                 month_unknown += 1
-                ages['出生年份未知'] += 1
                 continue
-            base = today.year - int(birth[:4])
-            low, high = max(0, base - 1), base
             if len(birth) == 7:
                 month = int(birth[5:])
                 months[month] += 1
                 if month == today.month:
                     birthdays.append(dict(id=r['id'], name=r['name'], birth=birth, group=r['group'],
                                           labels=record_labels(r)))
-                elif month < today.month:
-                    low = high = base
-                else:
-                    low = high = max(0, base - 1)
             else:
                 month_unknown += 1
-            band = next((label for lower, upper, label in age_bands if lower <= low <= high <= upper), '年龄段不确定')
-            ages[band] += 1
         return dict(total=len(self.book), trash=len(self.trash), favorites=favorites,
                     groups=groups, interests=interests, months=months, ages=ages,
                     birthdays=birthdays, birth_unknown=birth_unknown, month_unknown=month_unknown,
                     interests_unknown=interests_unknown)
+
+    def quality_overview(self):
+        counts = Counter({key: 0 for key, _ in QUALITY_CHECKS})
+        for record in self.book:
+            counts.update(missing_fields(record))
+        return counts
+
+    def statistics_records(self, dimension, category, today=None):
+        """Drill down with the same definitions as the charts, in linked order."""
+        today = today or datetime.now().date()
+        return [copy.deepcopy(record) for record in self.book
+                if matches_category(record, dimension, category, today)]

@@ -73,7 +73,7 @@ def test_multi_label_statistics_counts_every_label(window):
     assert chart.canvas.mode == 'donut' and chart.canvas.progress == 1.
     assert sum(span for _, _, span in chart.canvas.donut_spans()) == 360.
     assert chart.animation.state() == QAbstractAnimation.State.Stopped
-    assert set(window.stats_charts) == {'标签', '年龄', '兴趣', '生日月份'}
+    assert set(window.stats_charts) == {'标签', '年龄', '兴趣', '生日月份', '资料检查'}
 
 
 def test_charts_animate_only_first_view_of_each_mode(window):

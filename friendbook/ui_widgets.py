@@ -244,8 +244,11 @@ class Editor(QWidget):
                 ('interests', '兴趣', '阅读、摄影、徒步……'), ('tags', '备注', '简短备注，多条可用逗号分隔')]:
             box = QVBoxLayout()
             box.setSpacing(5)
-            box.addWidget(label(title_, 'fieldLabel'))
+            caption = label(title_, 'fieldLabel')
+            box.addWidget(caption)
             field = QLineEdit(', '.join(record[key]) if key == 'tags' else record[key])
+            field.setAccessibleName(title_)
+            caption.setBuddy(field)
             field.setPlaceholderText(placeholder)
             self.fields[key] = field
             box.addWidget(field)
@@ -261,6 +264,7 @@ class Editor(QWidget):
         for name in PROFILE_FIELDS:
             extra_layout.addWidget(label(name, 'fieldLabel'))
             field = QLineEdit(record['custom'].get(name, ''))
+            field.setAccessibleName(name)
             field.setPlaceholderText('未知可留空')
             self.profile_fields[name] = field
             extra_layout.addWidget(field)
@@ -280,6 +284,7 @@ class Editor(QWidget):
                             '自由添加属性，例如相识地点、喜欢的颜色。籍贯等常用资料在“资料”页编辑。')
         self.tabs.addTab(self.custom, '自定义')
         self.notes = QPlainTextEdit(record['notes'])
+        self.notes.setAccessibleName('详细备注')
         self.notes.setPlaceholderText('记录近况、相识故事，或下次见面想聊的事情……')
         self.tabs.addTab(self.notes, '详细备注')
         self.error = label('', 'error', True)

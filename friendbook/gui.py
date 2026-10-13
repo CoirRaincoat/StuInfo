@@ -15,10 +15,11 @@ from .ui_management import ListManagement
 from .ui_friend_list import FriendsTable
 from .ui_motion import DrawerWorkspace, ClickFeedback, Ripple
 from .ui_charts import DistributionChart
+from .ui_saved_views import SavedViews
 from .contact_fields import PROFILE_FIELDS, grouped_contacts, contact_caption
 
 
-class Window(QMainWindow, Pages, DataActions, ListManagement):
+class Window(QMainWindow, Pages, DataActions, ListManagement, SavedViews):
     PAGE_NAMES = ('概览', '好友', '分组', '统计', '导入与备份', '回收站', '设置', '链表教学')
     DESCRIPTIONS = dict(zip(PAGE_NAMES, (
         '看见每一份关系，也留意那些还未知的信息。', '整理资料，记录共同的兴趣与故事。',
@@ -67,7 +68,7 @@ class Window(QMainWindow, Pages, DataActions, ListManagement):
         side.addWidget(label('我的空间', 'eyebrow'))
         self.nav = QListWidget()
         self.nav.setObjectName('navigation')
-        self.nav.addItems(self.PAGE_NAMES)
+        self.nav.addItems(['标签' if name == '分组' else name for name in self.PAGE_NAMES])
         self.nav.setCurrentRow(1)
         self.nav.currentRowChanged.connect(self._navigation_changed)
         side.addWidget(self.nav, 1)
@@ -92,6 +93,10 @@ class Window(QMainWindow, Pages, DataActions, ListManagement):
         self.notice = label('', 'notice', True)
         self.notice.hide()
         center.addWidget(self.notice)
+        self.notice_timer = QTimer(self)
+        self.notice_timer.setSingleShot(True)
+        self.notice_timer.setInterval(6500)
+        self.notice_timer.timeout.connect(self.notice.hide)
         self.progress = QProgressBar()
         self.progress.setRange(0, 0)
         self.progress.setTextVisible(False)
@@ -136,7 +141,9 @@ class Window(QMainWindow, Pages, DataActions, ListManagement):
         search_row.addWidget(self.management_button)
         layout.addLayout(search_row)
         self.filters_widget = QWidget()
-        filter_row = QHBoxLayout(self.filters_widget)
+        filters_layout = QVBoxLayout(self.filters_widget)
+        filters_layout.setContentsMargins(0, 0, 0, 0)
+        filter_row = QHBoxLayout()
         filter_row.setContentsMargins(0, 0, 0, 0)
         self.group = QComboBox()
         self.group.setMinimumWidth(105)
@@ -149,6 +156,9 @@ class Window(QMainWindow, Pages, DataActions, ListManagement):
         filter_row.addWidget(self.tag, 1)
         filter_row.addWidget(self.sort, 1)
         filter_row.addWidget(button('重置', lambda: self.request_leave(lambda: self.set_filters(('', None, '', False, 0)))))
+        filters_layout.addLayout(filter_row)
+        self.saved_views_row = self.build_saved_views()
+        filters_layout.addWidget(self.saved_views_row)
         layout.addWidget(self.filters_widget)
         self.filters_widget.hide()
         self.hint = label('', 'muted', True)
@@ -246,10 +256,12 @@ class Window(QMainWindow, Pages, DataActions, ListManagement):
             self.request_leave_management(lambda: self._set_page(name))
             return
         self.page_name = name
+        self.notice_timer.stop()
+        self.notice.hide()
         self.nav.blockSignals(True)
         self.nav.setCurrentRow(self.PAGE_NAMES.index(name))
         self.nav.blockSignals(False)
-        self.heading.setText(name)
+        self.heading.setText('标签' if name == '分组' else name)
         self.subtitle.setText(self.DESCRIPTIONS[name])
         self.pages.setCurrentWidget(self.page_widgets[name])
         self.add_button.setVisible(name in ('好友', '概览'))
@@ -305,11 +317,14 @@ class Window(QMainWindow, Pages, DataActions, ListManagement):
         return box.exec() == QMessageBox.StandardButton.Yes
 
     def notify(self, text, error=False):
+        self.notice_timer.stop()
         self.notice.setText(text)
         self.notice.setObjectName('error' if error else 'notice')
         self.notice.style().unpolish(self.notice)
         self.notice.style().polish(self.notice)
         self.notice.show()
+        if not error:
+            self.notice_timer.start()
         self.statusBar().showMessage('操作未完成' if error else '就绪 · 本地保存')
 
     def refresh_all(self):
@@ -427,6 +442,7 @@ class Window(QMainWindow, Pages, DataActions, ListManagement):
         self.query.setPlaceholderText('搜索回收站中的姓名或备注…' if trash else '搜索好友、兴趣、联系方式或备注…')
         self.group.setEnabled(not trash)
         self.tag.setEnabled(not trash)
+        self.saved_views_row.setVisible(not trash)
         total = source.counts()[int(trash)]
         self.hint.setText(f'显示 {len(records)} / {total} 位  ·  ' + ('还原后置于原始顺序末尾' if trash else ('临时排序仅改变显示顺序' if sort else '原始顺序')))
         if self.managing:
@@ -790,8 +806,7 @@ class Window(QMainWindow, Pages, DataActions, ListManagement):
         self.management_bar.finish_motion()
         if reduced:
             for chart in self.stats_tabs.findChildren(DistributionChart):
-                chart.animation.stop()
-                chart._progress_changed(1.)
+                chart.finish_motion()
         for effect in self.findChildren(Ripple):
             effect.hide()
             effect.deleteLater()

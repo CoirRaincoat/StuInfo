@@ -1,18 +1,27 @@
 """A management draft owns a separate linked snapshot and never opens SQLite."""
 import json
+import copy
 
 from . import core
 from .core import Store
 from .labels import normalize_labels, record_labels
+from .linked import LinkedBook
+
+
+def clone_state(store):
+    """Clone trusted in-memory state; external archives still go through decode."""
+    book = LinkedBook()
+    for record in store.book:
+        book.insert(copy.deepcopy(record))
+    return book, copy.deepcopy(store.trash)
 
 
 class ManagementSession(Store):
     def __init__(self, store):
         self.path = store.path
         self.base_revision = self.revision = store.revision
-        payload = store.payload()
-        self.book, self.trash = self.decode(payload)
-        self.label_catalog = self._catalog_from_payload(payload)
+        self.book, self.trash = clone_state(store)
+        self.label_catalog = list(store.label_catalog)
         self._original = self.payload()
 
     @classmethod
@@ -24,11 +33,18 @@ class ManagementSession(Store):
 
     @property
     def dirty(self):
-        return self.payload() != self._original
+        # Compare with the immutable baseline without copying every record on each click.
+        original = self._original
+        if (self.label_catalog != original['label_catalog'] or
+                len(self.book) != len(original['active']) or
+                len(self.trash) != len(original['trash'])):
+            return True
+        return (any(record != old for record, old in zip(self.book, original['active'])) or
+                any(record != old for record, old in zip(self.trash.values(), original['trash'])))
 
     def change(self, operation, *, label_catalog=None):
         # Use the same clone / validate / publish boundary as Store, without I/O.
-        book, trash = self.decode(self.payload())
+        book, trash = clone_state(self)
         result = operation(book, trash)
         book.validate()
         catalog = normalize_labels(self.label_catalog if label_catalog is None else label_catalog, limit=50000)

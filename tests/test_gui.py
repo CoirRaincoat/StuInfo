@@ -232,16 +232,19 @@ def test_full_width_list_and_interruptible_detail_drawer(window):
     assert window.table.rowHeight(0) == 46
     window.table.selectRow(0)
     assert window.detail_panel.isVisible()
-    QTest.qWait(360)
+    wait_until(lambda: window.splitter.fraction == 1,
+               'detail drawer did not finish opening')
     assert window.list_area.width() < window.splitter.width()
     assert window.splitter.fraction == 1
     window.back_button.click()
-    QTest.qWait(340)
+    wait_until(lambda: not window.detail_panel.isVisible(),
+               'detail drawer did not finish closing')
     assert not window.detail_panel.isVisible()
     assert window.list_area.width() == window.splitter.width()
     window.select_uid(window.store.records()[1]['id'])
     window.resize(900, 650)
-    QTest.qWait(340)
+    wait_until(lambda: not window.list_area.isVisible() and window.detail_panel.isVisible(),
+               'compact detail layout did not settle after resize')
     assert not window.list_area.isVisible() and window.detail_panel.isVisible()
     window.resize(1280, 800)
     assert window.list_area.isVisible() and window.detail_panel.isVisible()

@@ -3,10 +3,11 @@ from datetime import date
 from PySide6.QtCore import Qt, QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QTableWidget,
-    QTableWidgetItem, QComboBox, QInputDialog, QHeaderView, QCheckBox, QTabWidget, QPushButton, QDialog, QSizePolicy)
+    QTableWidgetItem, QComboBox, QInputDialog, QHeaderView, QCheckBox, QTabWidget, QPushButton, QDialog, QSizePolicy, QFileDialog)
 from .ui_widgets import label, button, card, scroll_content, clear_layout, BarChart, configure_table, avatar_icon
 from .ui_charts import DistributionChart
 from .labels import record_labels
+from .analytics import AGE_ORDER, QUALITY_CHECKS
 
 
 class MetricButton(QPushButton):
@@ -67,15 +68,29 @@ class Pages:
         content.addWidget(BarChart([(name or '（未标记）', count) for name, count in data['groups'].most_common(6)]))
         content.addWidget(button('管理标签', lambda: self.navigate('分组')))
         self.home_layout.addWidget(frame)
+        gaps = self.store.quality_overview()
+        frame, content = card('资料检查', '字段均可留空。这里只帮助找到待补充的信息，不对好友档案打分。')
+        for key, title in QUALITY_CHECKS[:4]:
+            row = QHBoxLayout()
+            row.addWidget(label(title, 'muted'), 1)
+            row.addWidget(button(f'{gaps[key]} 位 · 查看',
+                                    lambda checked=False, k=key, text=title: self.show_statistics_records('资料检查', k, text)))
+            content.addLayout(row)
+        content.addWidget(button('查看全部检查项', self.open_quality_statistics))
+        self.home_layout.addWidget(frame)
         self.home_layout.addStretch()
 
     def show_collection(self, collection):
-        previous = getattr(self, 'collection_dialog', None)
-        if previous:
-            previous.close()
         records = ([self.store.record(record['id']) for record in self.store.overview()['birthdays']] if collection == 'birthdays'
                    else self.store.records(favorites=True))
         title = f'{date.today().month} 月生日好友' if collection == 'birthdays' else '收藏的好友'
+        self.show_record_collection(records, title,
+            '按已知出生月份列出全部好友；仅填写年份的档案不计入。' if collection == 'birthdays' else '')
+
+    def show_record_collection(self, records, title, description=''):
+        previous = getattr(self, 'collection_dialog', None)
+        if previous:
+            previous.close()
         dialog = QDialog(self)
         dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         dialog.setWindowModality(Qt.WindowModality.WindowModal)
@@ -98,9 +113,9 @@ class Pages:
         table.setCurrentCell(-1, -1)
         layout.addWidget(table, 1)
         if not records:
-            layout.addWidget(label('本月暂无已知生日的好友。' if collection == 'birthdays' else '还没有收藏的好友。', 'muted'))
-        if collection == 'birthdays':
-            layout.addWidget(label('按已知出生月份列出全部好友；仅填写年份的档案不计入。', 'muted', True))
+            layout.addWidget(label('当前分类没有匹配的好友。', 'muted'))
+        if description:
+            layout.addWidget(label(description, 'muted', True))
         close_row = QHBoxLayout()
         close_row.addStretch()
         close_row.addWidget(button('关闭', dialog.close))
@@ -116,6 +131,15 @@ class Pages:
         self.collection_dialog = dialog
         dialog.finished.connect(lambda _: setattr(self, 'collection_dialog', None))
         dialog.show()
+
+    def show_statistics_records(self, dimension, category, title, today=None):
+        records = self.store.statistics_records(dimension, category, today)
+        self.show_record_collection(records, f'{dimension} · {title}',
+            '按图表相同口径列出有效好友；点击记录可查看、编辑。回收站不计入。')
+
+    def open_quality_statistics(self):
+        self.navigate('统计')
+        self.stats_tabs.setCurrentIndex(list(self.stats_layouts).index('资料检查'))
 
     def build_groups(self):
         page = QWidget()
@@ -198,36 +222,70 @@ class Pages:
         self.stats_layouts = {}
         self._played_statistics = set()
         self.stats_charts = {}
-        for title in ('标签', '年龄', '兴趣', '生日月份'):
+        for title in ('标签', '年龄', '兴趣', '生日月份', '资料检查'):
             page, layout = scroll_content()
             self.stats_layouts[title] = layout
             self.stats_tabs.addTab(page, title)
         return self.stats_tabs
 
     def refresh_statistics(self):
-        data = self.store.overview()
+        today = date.today()
+        data = self.store.overview(today)
+        gaps = self.store.quality_overview()
         modes = {key: chart.choice.currentIndex() for key, chart in self.stats_charts.items()}
-        order = ['0–17 岁', '18–29 岁', '30–44 岁', '45–59 岁', '60 岁及以上', '年龄段不确定', '出生年份未知']
+        groups = data['groups'].most_common()
+        group_names = set(data['groups'])
+        missing_label = '（未标记）'
+        while missing_label in group_names:
+            missing_label += ' · 无标签'
         plots = {
-            '年龄': ('年龄分布', [(k, data['ages'].get(k, 0)) for k in order],
+            '年龄': ('年龄分布', [(k, data['ages'].get(k, 0)) for k in AGE_ORDER],
                 '依据当前日期及已知出生年份、月份计算可能年龄范围。仅当整个范围属于同一年龄段时计入，否则计为“年龄段不确定”；出生年份缺失单列未知。没有补造出生日期。'),
             '兴趣': ('兴趣分布', data['interests'].most_common(),
                 f"兴趣按逗号、顿号、分号或换行拆分；同一好友的相同兴趣仅计一次，可计入多个类别。{data['interests_unknown']} 位未填写兴趣，不用标签代替兴趣。"),
-            '标签': ('各标签人数', [(k or '（未标记）', v) for k, v in data['groups'].most_common()],
+            '标签': ('各标签人数', [(k or missing_label, v) for k, v in groups],
                 '每位好友按拥有的标签分别计数，可计入多个标签；没有标签的好友单列“未标记”。图例比例按所有标签归属次数计算，相加为 100%；回收站档案不计入。'),
             '生日月份': ('生日月份', [(f'{m} 月', data['months'].get(m, 0)) for m in range(1, 13)] + [('月份未知', data['month_unknown'])],
-                '只有 YYYY-MM 格式计入相应月份；仅年份或出生信息为空的档案计入“月份未知”。')}
+                '只有 YYYY-MM 格式计入相应月份；仅年份或出生信息为空的档案计入“月份未知”。'),
+            '资料检查': ('可补充的资料', [(title, gaps[key]) for key, title in QUALITY_CHECKS],
+                '全部字段均可留空，这些检查项不是错误，也不构成完整度评分。同一好友可以同时缺少多项，环图比例以缺失项归属总次数为分母；未知年月不会自动补全。')}
+        categories = {'标签': [name for name, _ in groups], '年龄': AGE_ORDER,
+                      '兴趣': [name for name, _ in data['interests'].most_common()],
+                      '生日月份': list(range(1, 13)) + [None],
+                      '资料检查': [key for key, _ in QUALITY_CHECKS]}
         for key, (title, values, description) in plots.items():
             layout = self.stats_layouts[key]
             clear_layout(layout)
             frame, content = card(title, f"统计范围：全部 {data['total']} 位有效好友")
             chart = DistributionChart(values, key, self._played_statistics)
+            chart.category_activated.connect(
+                lambda index, k=key, keys=categories[key], rows=values, day=today:
+                    self.show_statistics_records(k, keys[index], rows[index][0], day))
             chart.choice.setCurrentIndex(modes.get(key, 0))
             self.stats_charts[key] = chart
             content.addWidget(chart)
+            actions = QHBoxLayout()
+            actions.addWidget(label('支持键盘：方向键选择分类，Enter 查看好友，Esc 取消选择。', 'muted', True), 1)
+            actions.addWidget(button('导出图表 PNG',
+                lambda checked=False, c=chart, t=title, d=description, n=data['total'], day=today:
+                    self.export_statistics_chart(c, t, d, n, day)))
+            content.addLayout(actions)
             layout.addWidget(frame)
             layout.addWidget(label(description, 'muted', True))
             layout.addStretch()
+
+    def export_statistics_chart(self, chart, title, description, total, today):
+        path, _ = QFileDialog.getSaveFileName(self, '导出统计图表', title + '.png', 'PNG 图片 (*.png)')
+        if not path:
+            return
+        try:
+            self.store.check_export_destination(path)
+            chart.export_png(path, title=title,
+                             subtitle=f'{today.isoformat()} · 全部 {total} 位有效好友', description=description)
+        except Exception as exc:
+            self.notify(f'图表未导出：{exc}', error=True)
+            return
+        self.notify('统计图表已导出，包含完整图例和统计口径。')
 
     def build_data_page(self):
         page, layout = scroll_content()
